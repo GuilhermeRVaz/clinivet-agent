@@ -52,6 +52,9 @@ async def chat(request: ChatRequest):
 async def evolution_webhook(payload: Dict[str, Any]):
     try:
         parsed = parse_evolution_payload(payload)
+        if parsed is None:
+            return {"status": "ignored"}
+
         phone = parsed["phone"]
         thread_id = parsed["thread_id"]
         message = parsed["message"]

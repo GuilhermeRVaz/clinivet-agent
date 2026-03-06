@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib import error, request
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -17,18 +17,22 @@ def extract_phone(remote_jid: str) -> str:
     return remote_jid.replace("@s.whatsapp.net", "")
 
 
-def parse_evolution_payload(payload: Dict[str, Any]) -> Dict[str, str]:
+def parse_evolution_payload(payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
     data = payload.get("data") or {}
     key = data.get("key") or {}
     message_data = data.get("message") or {}
 
+    if key.get("fromMe"):
+        logger.info("Ignoring message sent by the bot itself.")
+        return None
+
     remote_jid = key.get("remoteJid")
-    message = message_data.get("conversation")
+    message = message_data.get("conversation") or message_data.get("extendedTextMessage", {}).get("text")
 
     if not remote_jid:
         raise ValueError("Missing data.key.remoteJid in payload.")
     if not isinstance(message, str) or not message.strip():
-        raise ValueError("Missing data.message.conversation in payload.")
+        raise ValueError("Missing data.message.conversation or data.message.extendedTextMessage.text in payload.")
 
     phone = extract_phone(remote_jid)
 
