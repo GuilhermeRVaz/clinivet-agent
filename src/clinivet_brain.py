@@ -2,7 +2,6 @@ import logging
 from typing import Annotated, List, Literal, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -27,6 +26,11 @@ from src.services.triage_service import (
 )
 
 logger = logging.getLogger("ClinivetBrain")
+
+try:
+    from langchain_openai import ChatOpenAI
+except ModuleNotFoundError:
+    ChatOpenAI = None
 
 TRIAGE_PROMPT = """
 Voce e o assistente da Clinivet Lins da Dra. Daniely.
@@ -65,8 +69,12 @@ UNKNOWN_PHONE = "unknown"
 UNKNOWN_PET = "Paciente"
 APPOINTMENT_DURATION_MINUTES = 30
 
-llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
-structured_llm = llm.with_structured_output(TriageOutput)
+if ChatOpenAI is not None:
+    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+    structured_llm = llm.with_structured_output(TriageOutput)
+else:
+    llm = None
+    structured_llm = None
 
 
 class ClinivetState(TypedDict, total=False):
@@ -83,6 +91,11 @@ class ClinivetState(TypedDict, total=False):
 
 
 def triage_node(state: ClinivetState):
+    if structured_llm is None:
+        raise RuntimeError(
+            "langchain_openai is required at runtime. Install dependencies with: pip install -r requirements.txt"
+        )
+
     system_msg = SystemMessage(content=TRIAGE_PROMPT)
     conversation: List[BaseMessage] = [system_msg] + list(state.get("messages") or [])
 
@@ -140,16 +153,18 @@ def triage_node(state: ClinivetState):
         )
         emergency_messages = [AIMessage(content=emergency_message)]
 
-    return {
+    response = {
         "triage_data": triage_result,
         "lead_id": lead_id,
         "thread_id": state.get("thread_id"),
         "urgency_level": triage_result.urgency_level,
         "missing_fields": [],
         "assistant_message": emergency_message,
-        "messages": emergency_messages,
         "next_step": next_step,
     }
+    if emergency_messages:
+        response["messages"] = emergency_messages
+    return response
 
 
 def ask_missing_data_node(state: ClinivetState):

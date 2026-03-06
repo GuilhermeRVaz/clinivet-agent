@@ -26,7 +26,7 @@ class FakeCalendarService:
 
 
 def test_conversation_slot_filling_then_schedule(monkeypatch):
-    thread_id = "5514999990003"
+    thread_id = "conversation-thread-1"
     llm_sequence = SequenceStructuredLLM(
         [
             TriageOutput(

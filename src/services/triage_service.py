@@ -92,9 +92,4 @@ def build_missing_data_message(missing_fields: List[str]) -> str:
     if not missing_fields:
         return "Perfeito. Vamos continuar."
 
-    if len(missing_fields) == 1:
-        return MISSING_FIELD_QUESTIONS[missing_fields[0]]
-
-    return "Antes de continuar, preciso de algumas informacoes:\n" + "\n".join(
-        [f"- {MISSING_FIELD_QUESTIONS[field]}" for field in missing_fields]
-    )
+    return MISSING_FIELD_QUESTIONS[missing_fields[0]]
