@@ -1,5 +1,5 @@
-﻿import os
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -19,78 +19,68 @@ if not dotenv_loaded:
 else:
     logger.info(f".env carregado de: {DOTENV_PATH}")
 
-# =========================================================
-# CONFIGURACOES OBRIGATORIAS
-# =========================================================
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Optional[Client] = None
 
 if ENV_SUPABASE_URL_BEFORE_DOTENV and ENV_SUPABASE_URL_BEFORE_DOTENV != SUPABASE_URL:
     logger.warning(
         "SUPABASE_URL preexistente no ambiente foi sobrescrita pelo valor do .env."
     )
 
-print(f"[ClinivetDB] SUPABASE_URL lida do ambiente: {SUPABASE_URL}")
 logger.info(f"SUPABASE_URL lida do ambiente: {SUPABASE_URL}")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise EnvironmentError(
-        f"SUPABASE_URL ou SUPABASE_KEY nao definidos. Verifique o arquivo .env em: {DOTENV_PATH}"
-    )
 
-if not SUPABASE_URL.startswith("https://"):
-    raise ValueError(
-        f"SUPABASE_URL invalida: '{SUPABASE_URL}'. Ela deve comecar com 'https://'."
-    )
+def get_supabase_client() -> Client:
+    global supabase
+    if supabase is not None:
+        return supabase
 
-try:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception as e:
-    raise ConnectionError(
-        "Falha ao inicializar cliente Supabase. "
-        f"SUPABASE_URL usada: '{SUPABASE_URL}'. Erro original: {e}"
-    ) from e
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise EnvironmentError(
+            f"SUPABASE_URL ou SUPABASE_KEY nao definidos. Verifique o arquivo .env em: {DOTENV_PATH}"
+        )
 
-logger.info("Cliente Supabase inicializado com sucesso.")
+    if not SUPABASE_URL.startswith("https://"):
+        raise ValueError(
+            f"SUPABASE_URL invalida: '{SUPABASE_URL}'. Ela deve comecar com 'https://'."
+        )
+
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as exc:
+        raise ConnectionError(
+            "Falha ao inicializar cliente Supabase. "
+            f"SUPABASE_URL usada: '{SUPABASE_URL}'. Erro original: {exc}"
+        ) from exc
+
+    logger.info("Cliente Supabase inicializado com sucesso.")
+    return supabase
 
 
-# =========================================================
-# LEADS
-# =========================================================
-
-def register_lead(
-    tutor_name: str,
-    pet_name: str,
-    pet_species: str,
-    phone: str
-) -> int:
-    """
-    Cria lead e retorna lead_id.
-    """
-
+def register_lead(tutor_name: str, pet_name: str, pet_species: str, phone: str) -> int:
     data = {
         "tutor_name": tutor_name,
         "pet_name": pet_name,
         "pet_species": pet_species,
         "phone": phone,
-        "status": "Interessado"
+        "status": "Interessado",
     }
 
-    response = supabase.table("leads").insert(data).execute()
+    response = get_supabase_client().table("leads").insert(data).execute()
 
     if not response.data:
         logger.error(f"Erro ao registrar lead: {response}")
         raise Exception("Falha ao registrar lead.")
 
     lead_id = response.data[0]["id"]
-    logger.info(f"Lead criado com ID {lead_id}")
+    logger.info(f"LEAD CREATED: {lead_id}")
     return lead_id
 
 
 def update_lead_status(lead_id: int, new_status: str):
     response = (
-        supabase
+        get_supabase_client()
         .table("leads")
         .update({"status": new_status})
         .eq("id", lead_id)
@@ -105,14 +95,9 @@ def update_lead_status(lead_id: int, new_status: str):
     return response.data
 
 
-# =========================================================
-# SERVICOS
-# =========================================================
-
 def get_service_id_by_name(service_name: str) -> int:
-
     response = (
-        supabase
+        get_supabase_client()
         .table("services")
         .select("id")
         .eq("name", service_name)
@@ -121,9 +106,8 @@ def get_service_id_by_name(service_name: str) -> int:
     )
 
     if not response.data:
-        # fallback seguro
         response = (
-            supabase
+            get_supabase_client()
             .table("services")
             .select("id")
             .eq("name", "Consulta")
@@ -137,41 +121,39 @@ def get_service_id_by_name(service_name: str) -> int:
     return response.data[0]["id"]
 
 
-# =========================================================
-# AGENDAMENTOS
-# =========================================================
-
 def confirm_appointment(
     lead_id: int,
     service_id: int,
     appointment_time: str,
     duration_minutes: int,
-    google_event_id: Optional[str] = None
+    google_event_id: Optional[str] = None,
 ):
-    """
-    Insere agendamento no banco.
-    NAO atualiza lead status automaticamente.
-    """
-
     data = {
         "lead_id": lead_id,
         "service_id": service_id,
         "appointment_time": appointment_time,
         "duration_minutes": duration_minutes,
         "status": "Confirmado",
-        "google_event_id": google_event_id
+        "google_event_id": google_event_id,
     }
 
-    response = (
-        supabase
-        .table("appointments")
-        .insert(data)
-        .execute()
-    )
+    response = get_supabase_client().table("appointments").insert(data).execute()
 
     if not response.data:
         logger.error("Erro ao inserir agendamento.")
         raise Exception("Falha ao confirmar agendamento.")
 
-    logger.info(f"Agendamento criado para lead {lead_id}")
+    logger.info(f"APPOINTMENT CREATED: lead_id={lead_id}")
     return response.data[0]
+
+
+def has_appointment_for_lead(lead_id: int) -> bool:
+    response = (
+        get_supabase_client()
+        .table("appointments")
+        .select("id")
+        .eq("lead_id", lead_id)
+        .limit(1)
+        .execute()
+    )
+    return bool(response.data)
