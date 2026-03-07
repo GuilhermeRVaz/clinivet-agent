@@ -4,6 +4,7 @@ from typing import List, Optional
 from src.models.triage_model import TriageOutput
 
 DEFAULT_SERVICE = "Consulta"
+UNKNOWN_PET_SIZE = "unknown"
 
 REQUIRED_FIELDS_FOR_APPOINTMENT = ["pet_name", "tutor_name", "phone"]
 MISSING_FIELD_QUESTIONS = {
@@ -30,12 +31,32 @@ def extract_phone_candidate(raw_value: Optional[str]) -> Optional[str]:
     return digits
 
 
+def classify_pet_size(weight: Optional[float]) -> str:
+    if weight is None:
+        return UNKNOWN_PET_SIZE
+    if weight <= 10:
+        return "pequeno"
+    if weight <= 25:
+        return "medio"
+    return "grande"
+
+
 def normalize_triage_result(triage: TriageOutput) -> TriageOutput:
     triage.tutor_name = clean_text(triage.tutor_name)
     triage.pet_name = clean_text(triage.pet_name)
     triage.symptoms_summary = clean_text(triage.symptoms_summary)
     triage.service_suggested = clean_text(triage.service_suggested) or DEFAULT_SERVICE
     triage.phone = extract_phone_candidate(triage.phone)
+    triage.pet_breed = clean_text(triage.pet_breed)
+    triage.pet_age = clean_text(triage.pet_age)
+
+    if triage.pet_weight is not None:
+        try:
+            triage.pet_weight = float(triage.pet_weight)
+        except (TypeError, ValueError):
+            triage.pet_weight = None
+
+    triage.pet_size = classify_pet_size(triage.pet_weight)
     return triage
 
 
@@ -67,6 +88,10 @@ def merge_triage_data(previous: Optional[TriageOutput], current: TriageOutput) -
         ),
         symptoms_summary=current.symptoms_summary or previous.symptoms_summary,
         phone=current.phone or previous.phone,
+        pet_weight=current.pet_weight if current.pet_weight is not None else previous.pet_weight,
+        pet_breed=current.pet_breed or previous.pet_breed,
+        pet_age=current.pet_age or previous.pet_age,
+        pet_size=current.pet_size or previous.pet_size,
     )
 
     return normalize_triage_result(merged)

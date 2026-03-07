@@ -11,3 +11,7 @@ class TriageOutput(BaseModel):
     service_suggested: str = "Consulta"
     symptoms_summary: Optional[str] = None
     phone: Optional[str] = None
+    pet_weight: Optional[float] = None
+    pet_breed: Optional[str] = None
+    pet_age: Optional[str] = None
+    pet_size: Optional[str] = None

@@ -1,6 +1,8 @@
 from langchain_core.messages import HumanMessage
 
 from src.clinivet_brain import TriageOutput, triage_node
+from src.clinivet_calendar import get_calendar_service_type
+from src.services.triage_service import classify_pet_size
 
 
 class DummyStructuredLLM:
@@ -121,3 +123,41 @@ def test_phone_extraction_from_message(monkeypatch):
     result = triage_node(_base_state("Meu telefone e (14) 99999-1111."))
 
     assert result["triage_data"].phone == "14999991111"
+
+
+def test_pet_size_is_derived_from_weight(monkeypatch):
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        DummyStructuredLLM(
+            TriageOutput(
+                tutor_name="Carlos",
+                pet_name="Thor",
+                pet_species="Cao",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone="14999999999",
+                pet_weight=12.5,
+            )
+        ),
+    )
+    monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 505)
+
+    result = triage_node(_base_state("Meu cachorro pesa 12.5kg e precisa consulta."))
+
+    assert result["triage_data"].pet_size == "medio"
+
+
+def test_classify_pet_size_rules():
+    assert classify_pet_size(None) == "unknown"
+    assert classify_pet_size(5) == "pequeno"
+    assert classify_pet_size(10) == "pequeno"
+    assert classify_pet_size(11) == "medio"
+    assert classify_pet_size(25) == "medio"
+    assert classify_pet_size(26) == "grande"
+
+
+def test_service_calendar_mapping():
+    assert get_calendar_service_type("Consulta") == "calendar_consultas"
+    assert get_calendar_service_type("Banho e Tosa") == "calendar_banho_tosa"
+    assert get_calendar_service_type("Cirurgia") == "calendar_cirurgia"
+    assert get_calendar_service_type("Vacinacao") == "calendar_vacinas"

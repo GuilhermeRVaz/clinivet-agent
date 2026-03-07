@@ -38,10 +38,17 @@ def test_agent_flow_schedules_after_complete_data(monkeypatch):
         ),
     )
     monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 1)
-    monkeypatch.setattr("src.clinivet_brain.get_calendar_service", lambda: FakeCalendarService())
+    monkeypatch.setattr(
+        "src.clinivet_brain.resolve_scheduling_context",
+        lambda _service_name, preferred_day=None: ("Consulta", preferred_day or "2030-01-01", ["09:00", "09:30"]),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_calendar_service", lambda *_args, **_kwargs: FakeCalendarService()
+    )
     monkeypatch.setattr("src.clinivet_brain.get_service_id_by_name", lambda _name: 10)
     monkeypatch.setattr("src.clinivet_brain.has_appointment_for_lead", lambda _lead_id: False)
     monkeypatch.setattr("src.clinivet_brain.confirm_appointment", lambda **_kwargs: {"id": 999})
+    monkeypatch.setattr("src.clinivet_brain.set_appointment_google_event_id", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("src.clinivet_brain.update_lead_status", lambda _lead_id, _status: True)
     monkeypatch.setattr(
         "src.clinivet_brain.build_slot_datetime",
@@ -78,7 +85,13 @@ def test_agent_flow_prevents_duplicate_appointment(monkeypatch):
         ),
     )
     monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 2)
-    monkeypatch.setattr("src.clinivet_brain.get_calendar_service", lambda: FakeCalendarService())
+    monkeypatch.setattr(
+        "src.clinivet_brain.resolve_scheduling_context",
+        lambda _service_name, preferred_day=None: ("Consulta", preferred_day or "2030-01-01", ["09:00", "09:30"]),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_calendar_service", lambda *_args, **_kwargs: FakeCalendarService()
+    )
     monkeypatch.setattr("src.clinivet_brain.get_service_id_by_name", lambda _name: 10)
     monkeypatch.setattr("src.clinivet_brain.has_appointment_for_lead", lambda _lead_id: True)
 
@@ -89,6 +102,7 @@ def test_agent_flow_prevents_duplicate_appointment(monkeypatch):
         return {"id": 1000}
 
     monkeypatch.setattr("src.clinivet_brain.confirm_appointment", _confirm_appointment)
+    monkeypatch.setattr("src.clinivet_brain.set_appointment_google_event_id", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("src.clinivet_brain.update_lead_status", lambda _lead_id, _status: True)
 
     result = clinivet_agent.invoke(

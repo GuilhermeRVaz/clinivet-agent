@@ -66,10 +66,17 @@ def test_conversation_slot_filling_then_schedule(monkeypatch):
 
     monkeypatch.setattr("src.clinivet_brain.structured_llm", llm_sequence)
     monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 77)
-    monkeypatch.setattr("src.clinivet_brain.get_calendar_service", lambda: FakeCalendarService())
+    monkeypatch.setattr(
+        "src.clinivet_brain.resolve_scheduling_context",
+        lambda _service_name, preferred_day=None: ("Consulta", preferred_day or "2030-01-01", ["10:00"]),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_calendar_service", lambda *_args, **_kwargs: FakeCalendarService()
+    )
     monkeypatch.setattr("src.clinivet_brain.get_service_id_by_name", lambda _name: 5)
     monkeypatch.setattr("src.clinivet_brain.has_appointment_for_lead", lambda _lead_id: False)
     monkeypatch.setattr("src.clinivet_brain.confirm_appointment", lambda **_kwargs: {"id": 500})
+    monkeypatch.setattr("src.clinivet_brain.set_appointment_google_event_id", lambda *_args, **_kwargs: True)
     monkeypatch.setattr("src.clinivet_brain.update_lead_status", lambda _lead_id, _status: True)
     monkeypatch.setattr(
         "src.clinivet_brain.build_slot_datetime",

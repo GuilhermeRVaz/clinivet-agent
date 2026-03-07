@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS leads (
     tutor_name TEXT NOT NULL,
     pet_name TEXT NOT NULL,
     pet_species TEXT NOT NULL,
+    pet_weight DOUBLE PRECISION,
+    pet_breed TEXT,
+    pet_age TEXT,
+    pet_size TEXT DEFAULT 'unknown',
 
     phone TEXT NOT NULL,
 
@@ -26,7 +30,7 @@ CREATE TABLE IF NOT EXISTS leads (
             'Interessado',
             'Triagem Realizada',
             'Agendado',
-            'Concluído'
+            'Concluido'
         ))
 );
 
@@ -38,7 +42,6 @@ ON leads(status);
 
 CREATE INDEX IF NOT EXISTS idx_leads_created
 ON leads(created_at);
-
 
 
 -- ==========================================
@@ -56,29 +59,32 @@ CREATE TABLE IF NOT EXISTS services (
 
     price DECIMAL(10,2),
 
+    calendar_type TEXT DEFAULT 'calendar_consultas',
+
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 
-INSERT INTO services (name, category, duration_minutes) VALUES
-('Consulta', 'Regular', 30),
-('Vacina', 'Regular', 15),
-('Cirurgia Tecidos Moles', 'Urgência', 60),
-('Anestesia Inalatória', 'Urgência', 60),
-('Ultrassonografia', 'Regular', 30),
-('Acupuntura', 'Regular', 45),
-('Laserterapia', 'Regular', 20),
-('Internação', 'Urgência', 1440),
-('Banho e Tosa', 'Regular', 60),
-('Venda de Medicamentos', 'Especial', 10),
-('Quimioterapia', 'Especial', 60),
-('Atestado de Saúde', 'Regular', 20),
-('Aferição de Pressão', 'Regular', 15),
-('Eletrocardiograma', 'Regular', 30),
-('Oxigenioterapia', 'Urgência', 60)
+INSERT INTO services (name, category, duration_minutes, calendar_type) VALUES
+('Consulta', 'Regular', 30, 'calendar_consultas'),
+('Vacina', 'Regular', 15, 'calendar_vacinas'),
+('Vacinacao', 'Regular', 15, 'calendar_vacinas'),
+('Cirurgia', 'Urgencia', 60, 'calendar_cirurgia'),
+('Cirurgia Tecidos Moles', 'Urgencia', 60, 'calendar_cirurgia'),
+('Anestesia Inalatoria', 'Urgencia', 60, 'calendar_cirurgia'),
+('Ultrassonografia', 'Regular', 30, 'calendar_consultas'),
+('Acupuntura', 'Regular', 45, 'calendar_consultas'),
+('Laserterapia', 'Regular', 20, 'calendar_consultas'),
+('Internacao', 'Urgencia', 1440, 'calendar_cirurgia'),
+('Banho e Tosa', 'Regular', 60, 'calendar_banho_tosa'),
+('Venda de Medicamentos', 'Especial', 10, 'calendar_consultas'),
+('Quimioterapia', 'Especial', 60, 'calendar_cirurgia'),
+('Atestado de Saude', 'Regular', 20, 'calendar_consultas'),
+('Afericao de Pressao', 'Regular', 15, 'calendar_consultas'),
+('Eletrocardiograma', 'Regular', 30, 'calendar_consultas'),
+('Oxigenioterapia', 'Urgencia', 60, 'calendar_cirurgia')
 
 ON CONFLICT (name) DO NOTHING;
-
 
 
 -- ==========================================
@@ -102,11 +108,16 @@ CREATE TABLE IF NOT EXISTS appointments (
 
     duration_minutes INT NOT NULL,
 
+    pet_weight DOUBLE PRECISION,
+    pet_breed TEXT,
+    pet_age TEXT,
+    pet_size TEXT DEFAULT 'unknown',
+
     status TEXT DEFAULT 'Confirmado'
         CHECK (status IN (
             'Confirmado',
             'Cancelado',
-            'Concluído'
+            'Concluido'
         )),
 
     google_event_id TEXT,
@@ -124,6 +135,8 @@ ON appointments(lead_id);
 CREATE INDEX IF NOT EXISTS idx_appointments_status
 ON appointments(status);
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_appointments_service_time
+ON appointments(service_id, appointment_time);
 
 
 -- ==========================================
@@ -145,7 +158,6 @@ WHERE a.appointment_time::DATE = CURRENT_DATE
 ORDER BY a.appointment_time ASC;
 
 
-
 CREATE OR REPLACE VIEW conversion_funnel AS
 SELECT
     COUNT(*) AS total_leads,
@@ -164,7 +176,6 @@ SELECT
 FROM leads;
 
 
-
 CREATE OR REPLACE VIEW top_services AS
 SELECT
     s.name AS servico,
@@ -174,7 +185,6 @@ LEFT JOIN appointments a
 ON s.id = a.service_id
 GROUP BY s.name
 ORDER BY total_agendamentos DESC;
-
 
 
 CREATE OR REPLACE VIEW cold_leads_followup AS

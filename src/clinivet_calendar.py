@@ -1,7 +1,8 @@
 import json
 import os
+import unicodedata
 from datetime import datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pytz
 from googleapiclient.discovery import build
@@ -15,6 +16,26 @@ DAY_FORMAT = "%Y-%m-%d"
 SLOT_FORMAT = "%H:%M"
 
 _calendar_service: Optional["GoogleCalendarService"] = None
+_calendar_services_by_type: Dict[str, "GoogleCalendarService"] = {}
+
+DEFAULT_CALENDAR_TYPE = "calendar_consultas"
+
+SERVICE_TO_CALENDAR_TYPE = {
+    "consulta": "calendar_consultas",
+    "retorno": "calendar_consultas",
+    "banho e tosa": "calendar_banho_tosa",
+    "cirurgia": "calendar_cirurgia",
+    "cirurgia tecidos moles": "calendar_cirurgia",
+    "vacinacao": "calendar_vacinas",
+    "vacina": "calendar_vacinas",
+}
+
+CALENDAR_ENV_BY_TYPE = {
+    "calendar_consultas": "GOOGLE_CALENDAR_CONSULTAS",
+    "calendar_banho_tosa": "GOOGLE_CALENDAR_BANHO_TOSA",
+    "calendar_cirurgia": "GOOGLE_CALENDAR_CIRURGIAS",
+    "calendar_vacinas": "GOOGLE_CALENDAR_VACINAS",
+}
 
 
 def _load_service_account_info() -> dict:
@@ -50,18 +71,13 @@ def build_slot_datetime(day: str, slot: str) -> datetime:
 
 
 class GoogleCalendarService:
-    def __init__(self):
+    def __init__(self, calendar_id: str):
         credentials_info = _load_service_account_info()
         credentials = service_account.Credentials.from_service_account_info(
             credentials_info,
             scopes=["https://www.googleapis.com/auth/calendar"],
         )
         self.client = build("calendar", "v3", credentials=credentials)
-
-        calendar_id = os.getenv("GOOGLE_CALENDAR_ID")
-        if not calendar_id:
-            raise EnvironmentError("GOOGLE_CALENDAR_ID nao definido.")
-
         self.calendar_id = calendar_id
 
     def get_free_slots(self, day: str) -> List[str]:
@@ -138,8 +154,47 @@ class GoogleCalendarService:
         return created.get("id", "")
 
 
-def get_calendar_service() -> "GoogleCalendarService":
+def normalize_service_key(service_name: Optional[str]) -> str:
+    if not service_name:
+        return ""
+    lowered = service_name.strip().lower()
+    return "".join(
+        char for char in unicodedata.normalize("NFD", lowered) if unicodedata.category(char) != "Mn"
+    )
+
+
+def get_calendar_service_type(service_name: Optional[str]) -> str:
+    service_key = normalize_service_key(service_name)
+    return SERVICE_TO_CALENDAR_TYPE.get(service_key, DEFAULT_CALENDAR_TYPE)
+
+
+def get_calendar_id_for_service(service_name: Optional[str]) -> str:
+    calendar_type = get_calendar_service_type(service_name)
+    env_var = CALENDAR_ENV_BY_TYPE.get(calendar_type)
+    if env_var:
+        configured = os.getenv(env_var)
+        if configured:
+            return configured
+
+    fallback = os.getenv("GOOGLE_CALENDAR_ID")
+    if fallback:
+        return fallback
+
+    if env_var:
+        raise EnvironmentError(f"{env_var} nao definido.")
+    raise EnvironmentError("GOOGLE_CALENDAR_ID nao definido.")
+
+
+def get_calendar_service(service_name: Optional[str] = None) -> "GoogleCalendarService":
     global _calendar_service
-    if _calendar_service is None:
-        _calendar_service = GoogleCalendarService()
-    return _calendar_service
+    if service_name is None:
+        if _calendar_service is None:
+            _calendar_service = GoogleCalendarService(get_calendar_id_for_service("Consulta"))
+        return _calendar_service
+
+    calendar_type = get_calendar_service_type(service_name)
+    if calendar_type not in _calendar_services_by_type:
+        _calendar_services_by_type[calendar_type] = GoogleCalendarService(
+            get_calendar_id_for_service(service_name)
+        )
+    return _calendar_services_by_type[calendar_type]

@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
@@ -58,13 +58,26 @@ def get_supabase_client() -> Client:
     return supabase
 
 
-def register_lead(tutor_name: str, pet_name: str, pet_species: str, phone: str) -> int:
+def register_lead(
+    tutor_name: str,
+    pet_name: str,
+    pet_species: str,
+    phone: str,
+    pet_weight: Optional[float] = None,
+    pet_breed: Optional[str] = None,
+    pet_age: Optional[str] = None,
+    pet_size: Optional[str] = None,
+) -> int:
     data = {
         "tutor_name": tutor_name,
         "pet_name": pet_name,
         "pet_species": pet_species,
         "phone": phone,
         "status": "Interessado",
+        "pet_weight": pet_weight,
+        "pet_breed": pet_breed,
+        "pet_age": pet_age,
+        "pet_size": pet_size,
     }
 
     response = get_supabase_client().table("leads").insert(data).execute()
@@ -121,13 +134,60 @@ def get_service_id_by_name(service_name: str) -> int:
     return response.data[0]["id"]
 
 
+def _normalize_candidate_slot(slot: str) -> str:
+    return slot
+
+
+def is_slot_available(service_id: int, appointment_time: str) -> bool:
+    response = (
+        get_supabase_client()
+        .table("appointments")
+        .select("id")
+        .eq("service_id", service_id)
+        .eq("appointment_time", appointment_time)
+        .limit(1)
+        .execute()
+    )
+    return not bool(response.data)
+
+
+def find_next_available_slot(
+    service_id: int,
+    candidate_slots: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    if not candidate_slots:
+        return None
+
+    for slot in candidate_slots:
+        normalized = _normalize_candidate_slot(slot)
+        if is_slot_available(service_id, normalized):
+            return normalized
+
+    return None
+
+
 def confirm_appointment(
     lead_id: int,
     service_id: int,
     appointment_time: str,
     duration_minutes: int,
     google_event_id: Optional[str] = None,
+    pet_weight: Optional[float] = None,
+    pet_breed: Optional[str] = None,
+    pet_age: Optional[str] = None,
+    pet_size: Optional[str] = None,
+    candidate_slots: Optional[Iterable[str]] = None,
 ):
+    if not is_slot_available(service_id, appointment_time):
+        next_slot = find_next_available_slot(service_id, candidate_slots)
+        logger.info(
+            "Conflito de agenda detectado antes da insercao. service_id=%s appointment_time=%s next=%s",
+            service_id,
+            appointment_time,
+            next_slot,
+        )
+        return {"status": "conflict", "next_available_time": next_slot}
+
     data = {
         "lead_id": lead_id,
         "service_id": service_id,
@@ -135,9 +195,26 @@ def confirm_appointment(
         "duration_minutes": duration_minutes,
         "status": "Confirmado",
         "google_event_id": google_event_id,
+        "pet_weight": pet_weight,
+        "pet_breed": pet_breed,
+        "pet_age": pet_age,
+        "pet_size": pet_size,
     }
-
-    response = get_supabase_client().table("appointments").insert(data).execute()
+    try:
+        response = get_supabase_client().table("appointments").insert(data).execute()
+    except Exception as exc:
+        message = str(exc).lower()
+        duplicate_violation = "duplicate key" in message or "23505" in message
+        if duplicate_violation:
+            next_slot = find_next_available_slot(service_id, candidate_slots)
+            logger.info(
+                "Conflito de agenda por concorrencia. service_id=%s appointment_time=%s next=%s",
+                service_id,
+                appointment_time,
+                next_slot,
+            )
+            return {"status": "conflict", "next_available_time": next_slot}
+        raise
 
     if not response.data:
         logger.error("Erro ao inserir agendamento.")
@@ -157,3 +234,14 @@ def has_appointment_for_lead(lead_id: int) -> bool:
         .execute()
     )
     return bool(response.data)
+
+
+def set_appointment_google_event_id(appointment_id: int, google_event_id: str):
+    response = (
+        get_supabase_client()
+        .table("appointments")
+        .update({"google_event_id": google_event_id})
+        .eq("id", appointment_id)
+        .execute()
+    )
+    return response.data

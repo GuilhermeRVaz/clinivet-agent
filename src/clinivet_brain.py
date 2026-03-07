@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Annotated, List, Literal, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
@@ -6,16 +7,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
-from src.clinivet_calendar import build_slot_datetime, get_calendar_service
+from src.clinivet_calendar import TIMEZONE, build_slot_datetime, get_calendar_service
 from src.clinivet_db import (
     confirm_appointment,
     get_service_id_by_name,
     has_appointment_for_lead,
     register_lead,
+    set_appointment_google_event_id,
     update_lead_status,
 )
 from src.models.triage_model import TriageOutput
-from src.services.scheduling_service import build_next_business_day
+from src.services.scheduling_service import resolve_scheduling_context
 from src.services.triage_service import (
     DEFAULT_SERVICE,
     build_missing_data_message,
@@ -43,6 +45,9 @@ Extract from conversation:
 - service_suggested
 - symptoms_summary
 - phone (only when explicitly informed)
+- pet_weight (kg)
+- pet_breed
+- pet_age
 
 Service detection allowed values:
 - Consulta
@@ -86,6 +91,7 @@ class ClinivetState(TypedDict, total=False):
     next_step: Optional[str]
     available_slots: Optional[List[str]]
     appointment_date: Optional[str]
+    service_name: Optional[str]
     missing_fields: Optional[List[str]]
     assistant_message: Optional[str]
 
@@ -131,6 +137,10 @@ def triage_node(state: ClinivetState):
                 pet_name=triage_result.pet_name,
                 pet_species=triage_result.pet_species,
                 phone=triage_result.phone or UNKNOWN_PHONE,
+                pet_weight=triage_result.pet_weight,
+                pet_breed=triage_result.pet_breed,
+                pet_age=triage_result.pet_age,
+                pet_size=triage_result.pet_size,
             )
         except Exception as exc:
             logger.exception("Failed to register lead: %s", exc)
@@ -178,11 +188,11 @@ def ask_missing_data_node(state: ClinivetState):
 
 
 def scheduling_node(state: ClinivetState):
-    calendar_service = get_calendar_service()
-    target_day = build_next_business_day()
+    triage_data = state.get("triage_data")
+    service_name = (triage_data.service_suggested if triage_data else None) or DEFAULT_SERVICE
 
     try:
-        available_slots = calendar_service.get_free_slots(target_day)
+        resolved_service, target_day, available_slots = resolve_scheduling_context(service_name)
     except Exception as exc:
         logger.exception("Failed to load slots: %s", exc)
         raise
@@ -196,6 +206,7 @@ def scheduling_node(state: ClinivetState):
         "next_step": "conversion",
         "available_slots": available_slots,
         "appointment_date": target_day,
+        "service_name": resolved_service,
     }
 
 
@@ -204,6 +215,9 @@ def conversion_node(state: ClinivetState):
     triage_data = state.get("triage_data")
     available_slots = state.get("available_slots")
     appointment_date = state.get("appointment_date")
+    service_name = state.get("service_name") or (
+        triage_data.service_suggested if triage_data else DEFAULT_SERVICE
+    )
 
     if not lead_id:
         raise ValueError("Lead nao encontrado.")
@@ -220,12 +234,61 @@ def conversion_node(state: ClinivetState):
             "next_step": "end",
         }
 
-    selected_slot = available_slots[0]
-    appointment_datetime = build_slot_datetime(appointment_date, selected_slot)
-    calendar_service = get_calendar_service()
-
-    service_name = triage_data.service_suggested or DEFAULT_SERVICE
+    calendar_service = get_calendar_service(service_name)
     pet_display_name = triage_data.pet_name or UNKNOWN_PET
+
+    service_id = get_service_id_by_name(service_name)
+
+    candidate_times = [
+        build_slot_datetime(appointment_date, slot).isoformat() for slot in available_slots
+    ]
+    appointment_record = None
+    chosen_time_iso: Optional[str] = None
+    attempt_index = 0
+
+    while attempt_index < len(candidate_times):
+        candidate_time = candidate_times[attempt_index]
+        result = confirm_appointment(
+            lead_id=lead_id,
+            service_id=service_id,
+            appointment_time=candidate_time,
+            duration_minutes=APPOINTMENT_DURATION_MINUTES,
+            google_event_id=None,
+            pet_weight=triage_data.pet_weight,
+            pet_breed=triage_data.pet_breed,
+            pet_age=triage_data.pet_age,
+            pet_size=triage_data.pet_size,
+            candidate_slots=candidate_times[attempt_index + 1 :],
+        )
+
+        if isinstance(result, dict) and result.get("status") == "conflict":
+            next_time = result.get("next_available_time")
+            if next_time and next_time in candidate_times:
+                attempt_index = candidate_times.index(next_time)
+                continue
+            if next_time and next_time not in candidate_times:
+                candidate_times.append(next_time)
+                attempt_index = len(candidate_times) - 1
+                continue
+            attempt_index += 1
+            continue
+
+        appointment_record = result
+        chosen_time_iso = candidate_time
+        break
+
+    if appointment_record is None or not chosen_time_iso:
+        no_slots_message = (
+            "Nao consegui confirmar esse horario porque ele acabou de ser ocupado. "
+            "Vou te apresentar novas opcoes em seguida."
+        )
+        return {
+            "assistant_message": no_slots_message,
+            "messages": [AIMessage(content=no_slots_message)],
+            "next_step": "end",
+        }
+
+    appointment_datetime = datetime.fromisoformat(chosen_time_iso).astimezone(TIMEZONE)
 
     try:
         event_id = calendar_service.create_event(
@@ -237,14 +300,12 @@ def conversion_node(state: ClinivetState):
         logger.exception("Failed to create Google Calendar event: %s", exc)
         event_id = None
 
-    service_id = get_service_id_by_name(service_name)
-    confirm_appointment(
-        lead_id=lead_id,
-        service_id=service_id,
-        appointment_time=appointment_datetime.isoformat(),
-        duration_minutes=APPOINTMENT_DURATION_MINUTES,
-        google_event_id=event_id,
-    )
+    if event_id and isinstance(appointment_record, dict) and appointment_record.get("id"):
+        try:
+            set_appointment_google_event_id(appointment_record["id"], event_id)
+        except Exception as exc:
+            logger.exception("Failed to persist google_event_id: %s", exc)
+
     update_lead_status(lead_id, "Agendado")
 
     confirmation_message = (
