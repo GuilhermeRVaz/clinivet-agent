@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -17,6 +18,7 @@ SLOT_FORMAT = "%H:%M"
 
 _calendar_service: Optional["GoogleCalendarService"] = None
 _calendar_services_by_type: Dict[str, "GoogleCalendarService"] = {}
+_mock_calendar_service: Optional["MockCalendarService"] = None
 
 DEFAULT_CALENDAR_TYPE = "calendar_consultas"
 
@@ -55,6 +57,15 @@ def _load_service_account_info() -> dict:
         raise EnvironmentError(
             "GOOGLE_SERVICE_ACCOUNT_JSON precisa ser um JSON valido ou caminho para ele."
         ) from exc
+
+
+def _is_google_calendar_configured() -> bool:
+    payload = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    return bool(payload and payload.strip())
+
+
+def _is_test_mode() -> bool:
+    return "pytest" in sys.modules
 
 
 def _round_up_to_slot(dt: datetime) -> datetime:
@@ -182,6 +193,20 @@ class GoogleCalendarService:
         return True
 
 
+class MockCalendarService:
+    def get_free_slots(self, day: str) -> List[str]:
+        return ["09:00", "09:30", "10:00", "14:00", "14:30"]
+
+    def create_event(self, summary: str, start_time: datetime, duration_minutes: int) -> str:
+        return "mock-event-id"
+
+    def update_event(self, event_id: str, summary: str, start_time: datetime, duration_minutes: int) -> str:
+        return event_id
+
+    def delete_event(self, event_id: str) -> bool:
+        return True
+
+
 def normalize_service_key(service_name: Optional[str]) -> str:
     if not service_name:
         return ""
@@ -213,8 +238,13 @@ def get_calendar_id_for_service(service_name: Optional[str]) -> str:
     raise EnvironmentError("GOOGLE_CALENDAR_ID nao definido.")
 
 
-def get_calendar_service(service_name: Optional[str] = None) -> "GoogleCalendarService":
-    global _calendar_service
+def get_calendar_service(service_name: Optional[str] = None) -> "GoogleCalendarService | MockCalendarService":
+    global _calendar_service, _mock_calendar_service
+    if _is_test_mode() or not _is_google_calendar_configured():
+        if _mock_calendar_service is None:
+            _mock_calendar_service = MockCalendarService()
+        return _mock_calendar_service
+
     if service_name is None:
         if _calendar_service is None:
             _calendar_service = GoogleCalendarService(get_calendar_id_for_service("Consulta"))

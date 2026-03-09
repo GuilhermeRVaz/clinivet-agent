@@ -413,6 +413,19 @@ def get_user_appointments(phone: str) -> List[dict]:
     return enriched
 
 
+def get_active_appointment_by_phone(phone: str) -> Optional[dict]:
+    appointments = get_user_appointments(phone)
+    if not appointments:
+        return None
+
+    ordered_appointments = sorted(
+        appointments,
+        key=lambda appointment: appointment["appointment_time"],
+        reverse=True,
+    )
+    return ordered_appointments[0]
+
+
 def cancel_appointment(appointment_id: int) -> Optional[dict]:
     response = (
         get_supabase_client()

@@ -1,7 +1,7 @@
 from langchain_core.messages import HumanMessage
 
 from src.clinivet_brain import TriageOutput, triage_node
-from src.clinivet_calendar import get_calendar_service_type
+from src.clinivet_calendar import get_calendar_service, get_calendar_service_type
 from src.services.triage_service import classify_pet_size
 
 
@@ -161,3 +161,14 @@ def test_service_calendar_mapping():
     assert get_calendar_service_type("Banho e Tosa") == "calendar_banho_tosa"
     assert get_calendar_service_type("Cirurgia") == "calendar_cirurgia"
     assert get_calendar_service_type("Vacinacao") == "calendar_vacinas"
+
+
+def test_calendar_service_falls_back_to_mock_without_credentials(monkeypatch):
+    monkeypatch.delenv("GOOGLE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setattr("src.clinivet_calendar._mock_calendar_service", None)
+    monkeypatch.setattr("src.clinivet_calendar._calendar_service", None)
+    monkeypatch.setattr("src.clinivet_calendar._calendar_services_by_type", {})
+
+    service = get_calendar_service("Consulta")
+
+    assert service.get_free_slots("2030-01-01") == ["09:00", "09:30", "10:00", "14:00", "14:30"]

@@ -11,6 +11,7 @@ from src.clinivet_calendar import TIMEZONE, build_slot_datetime, get_calendar_se
 from src.clinivet_db import (
     cancel_appointment as cancel_appointment_record,
     confirm_appointment,
+    get_active_appointment_by_phone,
     get_appointment_by_id,
     get_user_appointments,
     get_service_id_by_name,
@@ -25,16 +26,24 @@ from src.models.triage_model import TriageOutput
 from src.services.conversation_service import (
     detect_intent,
     extract_appointment_id,
+    parse_natural_date,
     extract_time_choice,
     extract_time_preference,
     format_appointments_message,
     format_pet_history_message,
     format_slots_message,
     get_latest_human_message,
+    is_conversation_closing,
     wants_slot_suggestions,
 )
 from src.services.pet_history_service import load_pet_history
-from src.services.scheduling_service import build_next_business_day, find_available_slots, resolve_scheduling_context
+from src.services.response_service import generate_conversational_response
+from src.services.scheduling_service import (
+    build_next_business_day,
+    find_available_slots,
+    is_valid_schedule_date,
+    resolve_scheduling_context,
+)
 from src.services.triage_service import (
     DEFAULT_SERVICE,
     build_missing_data_message,
@@ -110,12 +119,15 @@ class ClinivetState(TypedDict, total=False):
     next_step: Optional[str]
     available_slots: Optional[List[str]]
     appointment_date: Optional[str]
+    detected_date: Optional[str]
     service_name: Optional[str]
     missing_fields: Optional[List[str]]
     time_preference: Optional[str]
     selected_slot: Optional[str]
+    detected_time: Optional[str]
     selected_appointment_id: Optional[int]
     pending_action: Optional[str]
+    conversation_completed: Optional[bool]
     user_appointments: Optional[List[dict]]
     pet_history: Optional[dict]
     assistant_message: Optional[str]
@@ -136,6 +148,10 @@ def _build_event_summary(service_name: str, pet_name: Optional[str]) -> str:
 def _format_appointment_datetime(appointment_time_iso: str) -> str:
     appointment_datetime = datetime.fromisoformat(appointment_time_iso).astimezone(TIMEZONE)
     return appointment_datetime.strftime("%d/%m/%Y %H:%M")
+
+
+def _respond(action: str, base_message: str, **context) -> str:
+    return generate_conversational_response(action=action, base_message=base_message, context=context)
 
 
 def _persist_confirmed_appointment(
@@ -199,9 +215,44 @@ def triage_node(state: ClinivetState):
     intent = detect_intent(latest_message, pending_action)
     time_preference = extract_time_preference(latest_message) or state.get("time_preference")
     selected_slot = extract_time_choice(latest_message)
+    detected_date = parse_natural_date(latest_message) or state.get("detected_date")
     selected_appointment_id = extract_appointment_id(latest_message) or state.get(
         "selected_appointment_id"
     )
+    conversation_completed = bool(state.get("conversation_completed"))
+
+    if conversation_completed and intent not in {
+        "cancel",
+        "reschedule",
+        "check_appointment",
+        "load_pet_history",
+    }:
+        if is_conversation_closing(latest_message):
+            closing_message = _respond(
+                "closing",
+                "Por nada! Se precisar de mais alguma coisa, estou por aqui. Ate logo.",
+            )
+            return {
+                "assistant_message": closing_message,
+                "messages": [AIMessage(content=closing_message)],
+                "intent": "closing",
+                "next_step": "end",
+                "pending_action": None,
+                "conversation_completed": True,
+            }
+
+        already_confirmed_message = _respond(
+            "post_confirmation",
+            "Seu agendamento ja esta confirmado. Se quiser, posso te ajudar a consultar, remarcar ou cancelar.",
+        )
+        return {
+            "assistant_message": already_confirmed_message,
+            "messages": [AIMessage(content=already_confirmed_message)],
+            "intent": "post_confirmation",
+            "next_step": "end",
+            "pending_action": None,
+            "conversation_completed": True,
+        }
 
     if intent in {"cancel", "reschedule", "check_appointment", "load_pet_history"}:
         next_step = {
@@ -215,8 +266,11 @@ def triage_node(state: ClinivetState):
             "next_step": next_step,
             "time_preference": time_preference,
             "selected_slot": selected_slot,
+            "detected_time": selected_slot,
+            "detected_date": detected_date,
             "selected_appointment_id": selected_appointment_id,
             "pending_action": pending_action,
+            "conversation_completed": conversation_completed,
         }
 
     if pending_action == "confirm_slot" and selected_slot:
@@ -224,8 +278,11 @@ def triage_node(state: ClinivetState):
             "intent": "schedule",
             "next_step": "confirm_slot",
             "selected_slot": selected_slot,
+            "detected_time": selected_slot,
             "time_preference": time_preference,
+            "detected_date": detected_date,
             "selected_appointment_id": selected_appointment_id,
+            "conversation_completed": conversation_completed,
         }
 
     if pending_action == "awaiting_time_preference":
@@ -234,10 +291,32 @@ def triage_node(state: ClinivetState):
                 "intent": "schedule",
                 "next_step": "suggest_slots",
                 "time_preference": time_preference,
+                "detected_date": detected_date,
+                "conversation_completed": conversation_completed,
             }
         return {
             "intent": "schedule",
             "next_step": "ask_time_preference",
+            "detected_date": detected_date,
+            "conversation_completed": conversation_completed,
+        }
+
+    if pending_action == "awaiting_reschedule_date":
+        if detected_date:
+            return {
+                "intent": "reschedule",
+                "next_step": "reschedule_appointment",
+                "detected_date": detected_date,
+                "selected_appointment_id": selected_appointment_id,
+                "pending_action": "reschedule_appointment",
+                "conversation_completed": conversation_completed,
+            }
+        return {
+            "intent": "reschedule",
+            "next_step": "reschedule_appointment",
+            "selected_appointment_id": selected_appointment_id,
+            "pending_action": "awaiting_reschedule_date",
+            "conversation_completed": conversation_completed,
         }
 
     if structured_llm is None:
@@ -271,6 +350,7 @@ def triage_node(state: ClinivetState):
             "next_step": "ask_missing_data",
             "intent": intent,
             "time_preference": time_preference,
+            "detected_date": detected_date,
             "assistant_message": None,
         }
 
@@ -339,9 +419,12 @@ def triage_node(state: ClinivetState):
         "missing_fields": [],
         "assistant_message": emergency_message,
         "time_preference": time_preference,
+        "detected_date": detected_date,
         "selected_slot": selected_slot,
+        "detected_time": selected_slot,
         "selected_appointment_id": selected_appointment_id,
         "pending_action": None,
+        "conversation_completed": conversation_completed,
         "next_step": next_step,
     }
     if emergency_messages:
@@ -351,7 +434,7 @@ def triage_node(state: ClinivetState):
 
 def ask_missing_data_node(state: ClinivetState):
     missing_fields = state.get("missing_fields") or []
-    message = build_missing_data_message(missing_fields)
+    message = _respond("triage", build_missing_data_message(missing_fields))
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
@@ -360,7 +443,11 @@ def ask_missing_data_node(state: ClinivetState):
 
 
 def ask_time_preference_node(state: ClinivetState):
-    message = "Voce prefere manha, tarde ou qualquer horario?"
+    base_message = (
+        "Claro! Vamos encontrar um bom horario para o seu pet. "
+        "Voce prefere atendimento pela manha, a tarde, ou qualquer horario disponivel?"
+    )
+    message = _respond("schedule", base_message, detected_date=state.get("detected_date"))
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
@@ -375,15 +462,14 @@ def suggest_slots_node(state: ClinivetState):
         triage_data.service_suggested if triage_data else DEFAULT_SERVICE
     )
     time_preference = state.get("time_preference") or "any"
-    appointment_date = state.get("appointment_date") or build_next_business_day()
-    slots = find_available_slots(
-        date=appointment_date,
-        period=time_preference,
-        service_name=service_name,
-    )
-
-    if not slots:
-        message = "Nao encontrei horarios disponiveis para essa preferencia agora."
+    detected_date = state.get("detected_date")
+    appointment_date = detected_date or state.get("appointment_date") or build_next_business_day()
+    if detected_date:
+        is_valid_date, validation_message = is_valid_schedule_date(appointment_date)
+    else:
+        is_valid_date, validation_message = True, None
+    if not is_valid_date:
+        message = _respond("schedule", validation_message or "Nao consegui usar essa data para agendamento.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -391,7 +477,22 @@ def suggest_slots_node(state: ClinivetState):
             "pending_action": None,
         }
 
-    message = format_slots_message(slots)
+    slots = find_available_slots(
+        date=appointment_date,
+        period=time_preference,
+        service_name=service_name,
+    )
+
+    if not slots:
+        message = _respond("schedule", "Nao encontrei horarios disponiveis para essa preferencia agora.")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "next_step": "end",
+            "pending_action": None,
+        }
+
+    message = _respond("schedule", format_slots_message(slots), slots=slots, detected_date=appointment_date)
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
@@ -416,8 +517,21 @@ def confirm_slot_node(state: ClinivetState):
     if not lead_id or not triage_data:
         raise ValueError("Dados insuficientes para confirmar horario.")
 
+    if state.get("detected_date"):
+        is_valid_date, validation_message = is_valid_schedule_date(appointment_date)
+    else:
+        is_valid_date, validation_message = True, None
+    if not is_valid_date:
+        message = _respond("schedule", validation_message or "Nao consegui usar essa data para agendamento.")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "pending_action": None,
+            "next_step": "end",
+        }
+
     if not selected_slot:
-        message = "Qual horario voce prefere entre as opcoes enviadas?"
+        message = _respond("schedule", "Qual horario voce prefere entre as opcoes enviadas?")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -426,7 +540,10 @@ def confirm_slot_node(state: ClinivetState):
         }
 
     if available_slots and selected_slot not in available_slots:
-        message = "Esse horario nao esta entre as opcoes sugeridas. Escolha um dos horarios informados."
+        message = _respond(
+            "schedule",
+            "Esse horario nao esta entre as opcoes sugeridas. Escolha um dos horarios informados.",
+        )
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -435,7 +552,7 @@ def confirm_slot_node(state: ClinivetState):
         }
 
     if has_appointment_for_lead(lead_id):
-        duplicate_message = "Voce ja possui um agendamento registrado."
+        duplicate_message = _respond("schedule", "Voce ja possui um agendamento registrado.")
         return {
             "assistant_message": duplicate_message,
             "messages": [AIMessage(content=duplicate_message)],
@@ -444,18 +561,30 @@ def confirm_slot_node(state: ClinivetState):
         }
 
     appointment_time_iso = build_slot_datetime(appointment_date, selected_slot).isoformat()
-    confirmation_message = _persist_confirmed_appointment(
-        lead_id=lead_id,
-        pet_id=state.get("pet_id"),
-        triage_data=triage_data,
-        service_name=service_name,
-        appointment_time_iso=appointment_time_iso,
-    )
+    try:
+        confirmation_message = _persist_confirmed_appointment(
+            lead_id=lead_id,
+            pet_id=state.get("pet_id"),
+            triage_data=triage_data,
+            service_name=service_name,
+            appointment_time_iso=appointment_time_iso,
+        )
+    except RuntimeError:
+        conflict_message = _respond(
+            "schedule_conflict", "Esse horario acabou de ser reservado. Vou buscar outro disponivel."
+        )
+        return {
+            "assistant_message": conflict_message,
+            "messages": [AIMessage(content=conflict_message)],
+            "pending_action": None,
+            "next_step": "end",
+        }
 
     return {
         "assistant_message": confirmation_message,
         "messages": [AIMessage(content=confirmation_message)],
         "pending_action": None,
+        "conversation_completed": True,
         "next_step": "end",
     }
 
@@ -465,7 +594,17 @@ def scheduling_node(state: ClinivetState):
     service_name = (triage_data.service_suggested if triage_data else None) or DEFAULT_SERVICE
 
     try:
-        resolved_service, target_day, available_slots = resolve_scheduling_context(service_name)
+        resolved_service, target_day, available_slots = resolve_scheduling_context(
+            service_name, preferred_day=state.get("detected_date")
+        )
+    except ValueError as exc:
+        message = str(exc)
+        rendered_message = _respond("schedule", message)
+        return {
+            "assistant_message": rendered_message,
+            "messages": [AIMessage(content=rendered_message)],
+            "next_step": "end",
+        }
     except Exception as exc:
         logger.exception("Failed to load slots: %s", exc)
         raise
@@ -479,6 +618,7 @@ def scheduling_node(state: ClinivetState):
         "next_step": "conversion",
         "available_slots": available_slots,
         "appointment_date": target_day,
+        "detected_date": target_day,
         "service_name": resolved_service,
     }
 
@@ -500,7 +640,7 @@ def conversion_node(state: ClinivetState):
         raise ValueError("Dados de agendamento ausentes.")
 
     if has_appointment_for_lead(lead_id):
-        duplicate_message = "Voce ja possui um agendamento registrado."
+        duplicate_message = _respond("schedule", "Voce ja possui um agendamento registrado.")
         return {
             "assistant_message": duplicate_message,
             "messages": [AIMessage(content=duplicate_message)],
@@ -548,9 +688,8 @@ def conversion_node(state: ClinivetState):
         break
 
     if appointment_record is None or not chosen_time_iso:
-        no_slots_message = (
-            "Nao consegui confirmar esse horario porque ele acabou de ser ocupado. "
-            "Vou te apresentar novas opcoes em seguida."
+        no_slots_message = _respond(
+            "schedule_conflict", "Esse horario acabou de ser reservado. Vou buscar outro disponivel."
         )
         return {
             "assistant_message": no_slots_message,
@@ -559,13 +698,18 @@ def conversion_node(state: ClinivetState):
         }
 
     pet_display_name = triage_data.pet_name or UNKNOWN_PET
-    confirmation_message = _persist_confirmed_appointment(
+    confirmation_message = _respond(
+        "schedule_confirmation",
+        _persist_confirmed_appointment(
         lead_id=lead_id,
         pet_id=state.get("pet_id"),
         triage_data=triage_data,
         service_name=service_name,
         appointment_time_iso=chosen_time_iso,
         appointment_record=appointment_record,
+        ),
+        detected_date=appointment_date,
+        detected_time=chosen_time_iso,
     )
     appointment_datetime = datetime.fromisoformat(chosen_time_iso).astimezone(TIMEZONE)
 
@@ -575,6 +719,7 @@ def conversion_node(state: ClinivetState):
         "assistant_message": confirmation_message,
         "messages": [AIMessage(content=confirmation_message)],
         "pending_action": None,
+        "conversation_completed": True,
         "next_step": "end",
     }
 
@@ -582,7 +727,7 @@ def conversion_node(state: ClinivetState):
 def check_appointment_node(state: ClinivetState):
     phone = _resolve_phone_from_state(state)
     if not phone:
-        message = "Nao consegui identificar o telefone para consultar seus agendamentos."
+        message = _respond("check_appointment", "Nao consegui identificar o telefone para consultar seus agendamentos.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -593,7 +738,7 @@ def check_appointment_node(state: ClinivetState):
     for appointment in appointments:
         appointment["appointment_br"] = _format_appointment_datetime(appointment["appointment_time"])
 
-    message = format_appointments_message(appointments)
+    message = _respond("check_appointment", format_appointments_message(appointments), appointments=appointments)
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
@@ -606,7 +751,7 @@ def check_appointment_node(state: ClinivetState):
 def cancel_appointment_node(state: ClinivetState):
     phone = _resolve_phone_from_state(state)
     if not phone:
-        message = "Nao consegui identificar o telefone para cancelar o agendamento."
+        message = _respond("cancel", "Nao consegui identificar o telefone para cancelar o agendamento.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -615,7 +760,7 @@ def cancel_appointment_node(state: ClinivetState):
 
     appointments = get_user_appointments(phone)
     if not appointments:
-        message = "Nao encontrei agendamentos ativos para cancelar."
+        message = _respond("cancel", "Nao encontrei agendamentos ativos para cancelar.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -624,26 +769,15 @@ def cancel_appointment_node(state: ClinivetState):
         }
 
     appointment_id = state.get("selected_appointment_id")
-    if appointment_id is None:
-        if len(appointments) == 1:
-            appointment_id = appointments[0]["id"]
-        else:
-            for appointment in appointments:
-                appointment["appointment_br"] = _format_appointment_datetime(
-                    appointment["appointment_time"]
-                )
-            message = format_appointments_message(appointments) + "\nInforme o ID que deseja cancelar."
-            return {
-                "assistant_message": message,
-                "messages": [AIMessage(content=message)],
-                "user_appointments": appointments,
-                "pending_action": "cancel_appointment",
-                "next_step": "end",
-            }
+    appointment = get_appointment_by_id(appointment_id) if appointment_id is not None else None
 
-    appointment = get_appointment_by_id(appointment_id)
+    if appointment is None:
+        appointment = get_active_appointment_by_phone(phone)
+        if appointment:
+            appointment_id = appointment["id"]
+
     if not appointment:
-        message = "Nao encontrei o agendamento informado."
+        message = _respond("cancel", "Nao encontrei o agendamento informado.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -658,12 +792,13 @@ def cancel_appointment_node(state: ClinivetState):
         except Exception as exc:
             logger.exception("Failed to delete Google Calendar event: %s", exc)
 
-    message = f"Agendamento {appointment_id} cancelado com sucesso."
+    message = _respond("cancel", f"Agendamento {appointment_id} cancelado com sucesso.")
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
         "pending_action": None,
         "selected_appointment_id": None,
+        "conversation_completed": False,
         "next_step": "end",
     }
 
@@ -671,7 +806,7 @@ def cancel_appointment_node(state: ClinivetState):
 def reschedule_appointment_node(state: ClinivetState):
     phone = _resolve_phone_from_state(state)
     if not phone:
-        message = "Nao consegui identificar o telefone para remarcar o agendamento."
+        message = _respond("reschedule", "Nao consegui identificar o telefone para remarcar o agendamento.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -680,7 +815,7 @@ def reschedule_appointment_node(state: ClinivetState):
 
     appointments = get_user_appointments(phone)
     if not appointments:
-        message = "Nao encontrei agendamentos ativos para remarcar."
+        message = _respond("reschedule", "Nao encontrei agendamentos ativos para remarcar.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -689,26 +824,15 @@ def reschedule_appointment_node(state: ClinivetState):
         }
 
     appointment_id = state.get("selected_appointment_id")
-    if appointment_id is None:
-        if len(appointments) == 1:
-            appointment_id = appointments[0]["id"]
-        else:
-            for appointment in appointments:
-                appointment["appointment_br"] = _format_appointment_datetime(
-                    appointment["appointment_time"]
-                )
-            message = format_appointments_message(appointments) + "\nInforme o ID que deseja remarcar."
-            return {
-                "assistant_message": message,
-                "messages": [AIMessage(content=message)],
-                "user_appointments": appointments,
-                "pending_action": "reschedule_appointment",
-                "next_step": "end",
-            }
+    appointment = get_appointment_by_id(appointment_id) if appointment_id is not None else None
 
-    appointment = get_appointment_by_id(appointment_id)
+    if appointment is None:
+        appointment = get_active_appointment_by_phone(phone)
+        if appointment:
+            appointment_id = appointment["id"]
+
     if not appointment:
-        message = "Nao encontrei o agendamento informado."
+        message = _respond("reschedule", "Nao encontrei o agendamento informado.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -718,17 +842,51 @@ def reschedule_appointment_node(state: ClinivetState):
 
     selected_slot = state.get("selected_slot")
     time_preference = state.get("time_preference")
-    appointment_date = state.get("appointment_date") or build_next_business_day()
+    detected_date = state.get("detected_date")
+    appointment_date = detected_date or state.get("appointment_date") or build_next_business_day()
     service_name = appointment.get("service_name") or DEFAULT_SERVICE
     available_slots = state.get("available_slots") or []
 
     if not selected_slot:
+        if not state.get("detected_date") and not time_preference:
+            message = _respond(
+                "reschedule",
+                "Claro! Vamos remarcar a consulta do seu pet. Qual novo dia voce prefere?",
+                appointment_id=appointment_id,
+            )
+            return {
+                "assistant_message": message,
+                "messages": [AIMessage(content=message)],
+                "pending_action": "awaiting_reschedule_date",
+                "selected_appointment_id": appointment_id,
+                "next_step": "end",
+            }
+
         if not time_preference:
-            message = "Para remarcar, voce prefere manha, tarde ou qualquer horario?"
+            message = _respond(
+                "reschedule",
+                "Claro! Vamos remarcar a consulta do seu pet. "
+                "Voce prefere atendimento pela manha, a tarde, ou qualquer horario disponivel?",
+                detected_date=appointment_date,
+            )
             return {
                 "assistant_message": message,
                 "messages": [AIMessage(content=message)],
                 "pending_action": "reschedule_appointment",
+                "selected_appointment_id": appointment_id,
+                "next_step": "end",
+            }
+
+        if detected_date:
+            is_valid_date, validation_message = is_valid_schedule_date(appointment_date)
+        else:
+            is_valid_date, validation_message = True, None
+        if not is_valid_date:
+            message = _respond("reschedule", validation_message or "Nao consegui usar essa data para remarcacao.")
+            return {
+                "assistant_message": message,
+                "messages": [AIMessage(content=message)],
+                "pending_action": None,
                 "selected_appointment_id": appointment_id,
                 "next_step": "end",
             }
@@ -739,7 +897,7 @@ def reschedule_appointment_node(state: ClinivetState):
             service_name=service_name,
         )
         if not available_slots:
-            message = "Nao encontrei horarios disponiveis para essa preferencia."
+            message = _respond("reschedule", "Nao encontrei horarios disponiveis para essa preferencia.")
             return {
                 "assistant_message": message,
                 "messages": [AIMessage(content=message)],
@@ -747,7 +905,12 @@ def reschedule_appointment_node(state: ClinivetState):
                 "next_step": "end",
             }
 
-        message = format_slots_message(available_slots)
+        message = _respond(
+            "reschedule",
+            format_slots_message(available_slots),
+            slots=available_slots,
+            detected_date=appointment_date,
+        )
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -760,7 +923,7 @@ def reschedule_appointment_node(state: ClinivetState):
         }
 
     if available_slots and selected_slot not in available_slots:
-        message = "Escolha um dos horarios sugeridos para remarcar."
+        message = _respond("reschedule", "Escolha um dos horarios sugeridos para remarcar.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -769,11 +932,27 @@ def reschedule_appointment_node(state: ClinivetState):
             "next_step": "end",
         }
 
+    if detected_date:
+        is_valid_date, validation_message = is_valid_schedule_date(appointment_date)
+    else:
+        is_valid_date, validation_message = True, None
+    if not is_valid_date:
+        message = _respond("reschedule", validation_message or "Nao consegui usar essa data para remarcacao.")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "pending_action": None,
+            "selected_appointment_id": appointment_id,
+            "next_step": "end",
+        }
+
     new_time_iso = build_slot_datetime(appointment_date, selected_slot).isoformat()
     try:
         reschedule_appointment_record(appointment_id, new_time_iso)
     except ValueError:
-        message = "Esse horario nao esta mais disponivel. Posso te sugerir outras opcoes."
+        message = _respond(
+            "schedule_conflict", "Esse horario acabou de ser reservado. Vou buscar outro disponivel."
+        )
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -793,15 +972,19 @@ def reschedule_appointment_node(state: ClinivetState):
         except Exception as exc:
             logger.exception("Failed to update Google Calendar event: %s", exc)
 
-    message = (
+    message = _respond(
+        "reschedule_confirmation",
         f"Agendamento {appointment_id} remarcado para "
-        f"{_format_appointment_datetime(new_time_iso)}."
+        f"{_format_appointment_datetime(new_time_iso)}.",
+        detected_date=appointment_date,
+        detected_time=selected_slot,
     )
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
         "pending_action": None,
         "selected_appointment_id": None,
+        "conversation_completed": True,
         "next_step": "end",
     }
 
@@ -809,7 +992,7 @@ def reschedule_appointment_node(state: ClinivetState):
 def load_pet_history_node(state: ClinivetState):
     phone = _resolve_phone_from_state(state)
     if not phone:
-        message = "Nao consegui identificar o telefone para consultar o historico."
+        message = _respond("load_pet_history", "Nao consegui identificar o telefone para consultar o historico.")
         return {
             "assistant_message": message,
             "messages": [AIMessage(content=message)],
@@ -817,7 +1000,7 @@ def load_pet_history_node(state: ClinivetState):
         }
 
     history = load_pet_history(phone)
-    message = format_pet_history_message(history)
+    message = _respond("load_pet_history", format_pet_history_message(history), history=history)
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],

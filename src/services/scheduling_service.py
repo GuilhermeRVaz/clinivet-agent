@@ -6,6 +6,7 @@ from src.clinivet_calendar import TIMEZONE, get_calendar_service
 PERIOD_MORNING = "morning"
 PERIOD_AFTERNOON = "afternoon"
 PERIOD_ANY = "any"
+MAX_BOOKING_WINDOW_DAYS = 20
 
 
 def build_next_business_day(reference: Optional[datetime] = None) -> str:
@@ -15,6 +16,27 @@ def build_next_business_day(reference: Optional[datetime] = None) -> str:
 
 def detect_service_type(service_name: Optional[str]) -> str:
     return service_name or "Consulta"
+
+
+def is_valid_schedule_date(date: str) -> Tuple[bool, Optional[str]]:
+    try:
+        target_date = TIMEZONE.localize(datetime.strptime(date, "%Y-%m-%d")).date()
+    except ValueError:
+        return False, "Nao consegui entender a data informada."
+
+    today = datetime.now(TIMEZONE).date()
+    max_date = today + timedelta(days=MAX_BOOKING_WINDOW_DAYS)
+
+    if target_date < today:
+        return False, "Nao consigo agendar consultas em datas passadas."
+
+    if target_date > max_date:
+        return False, "Podemos agendar consultas ate 20 dias a frente."
+
+    if target_date.weekday() == 6:
+        return False, "Nao realizamos agendamentos aos domingos."
+
+    return True, None
 
 
 def get_available_slots_for_service(service_name: str, day: str) -> List[str]:
@@ -44,6 +66,9 @@ def find_available_slots(
     service_name: str = "Consulta",
     limit: int = 3,
 ) -> List[str]:
+    is_valid, _message = is_valid_schedule_date(date)
+    if not is_valid:
+        return []
     slots = get_available_slots_for_service(service_name, date)
     normalized_period = normalize_period(period)
     filtered = [slot for slot in slots if _slot_matches_period(slot, normalized_period)]
@@ -62,5 +87,38 @@ def resolve_scheduling_context(
 ) -> Tuple[str, str, List[str]]:
     resolved_service = detect_service_type(service_name)
     target_day = preferred_day or build_next_business_day()
+    is_valid, message = is_valid_schedule_date(target_day)
+    if not is_valid:
+        raise ValueError(message)
     slots = get_available_slots_for_service(resolved_service, target_day)
     return resolved_service, target_day, slots
+
+
+def schedule_appointment(
+    phone: str,
+    pet_name: str,
+    service: str,
+    date: str,
+    period: Optional[str] = None,
+) -> dict:
+    resolved_service = detect_service_type(service)
+    is_valid, validation_message = is_valid_schedule_date(date)
+    if not is_valid:
+        return {
+            "phone": phone,
+            "pet_name": pet_name,
+            "service": resolved_service,
+            "date": date,
+            "period": normalize_period(period),
+            "suggested_slots": [],
+            "message": validation_message,
+        }
+    suggested_slots = find_available_slots(date=date, period=period, service_name=resolved_service)
+    return {
+        "phone": phone,
+        "pet_name": pet_name,
+        "service": resolved_service,
+        "date": date,
+        "period": normalize_period(period),
+        "suggested_slots": suggested_slots,
+    }
