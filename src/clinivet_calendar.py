@@ -153,6 +153,34 @@ class GoogleCalendarService:
 
         return created.get("id", "")
 
+    def update_event(self, event_id: str, summary: str, start_time: datetime, duration_minutes: int) -> str:
+        start_time = start_time.astimezone(TIMEZONE)
+        end_time = start_time + timedelta(minutes=duration_minutes)
+        event = {
+            "summary": summary,
+            "start": {"dateTime": start_time.isoformat(), "timeZone": str(TIMEZONE)},
+            "end": {"dateTime": end_time.isoformat(), "timeZone": str(TIMEZONE)},
+        }
+
+        try:
+            updated = self.client.events().update(
+                calendarId=self.calendar_id,
+                eventId=event_id,
+                body=event,
+            ).execute()
+        except Exception as exc:
+            raise RuntimeError("Falha ao atualizar evento no Google Calendar.") from exc
+
+        return updated.get("id", event_id)
+
+    def delete_event(self, event_id: str) -> bool:
+        try:
+            self.client.events().delete(calendarId=self.calendar_id, eventId=event_id).execute()
+        except Exception as exc:
+            raise RuntimeError("Falha ao remover evento no Google Calendar.") from exc
+
+        return True
+
 
 def normalize_service_key(service_name: Optional[str]) -> str:
     if not service_name:

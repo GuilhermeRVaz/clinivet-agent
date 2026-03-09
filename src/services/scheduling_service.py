@@ -3,6 +3,10 @@ from typing import List, Optional, Tuple
 
 from src.clinivet_calendar import TIMEZONE, get_calendar_service
 
+PERIOD_MORNING = "morning"
+PERIOD_AFTERNOON = "afternoon"
+PERIOD_ANY = "any"
+
 
 def build_next_business_day(reference: Optional[datetime] = None) -> str:
     base = reference or datetime.now(TIMEZONE)
@@ -16,6 +20,34 @@ def detect_service_type(service_name: Optional[str]) -> str:
 def get_available_slots_for_service(service_name: str, day: str) -> List[str]:
     calendar_service = get_calendar_service(service_name)
     return calendar_service.get_free_slots(day)
+
+
+def normalize_period(period: Optional[str]) -> str:
+    normalized = (period or PERIOD_ANY).strip().lower()
+    if normalized in {PERIOD_MORNING, PERIOD_AFTERNOON, PERIOD_ANY}:
+        return normalized
+    return PERIOD_ANY
+
+
+def _slot_matches_period(slot: str, period: str) -> bool:
+    hour = int(slot.split(":")[0])
+    if period == PERIOD_MORNING:
+        return 8 <= hour < 12
+    if period == PERIOD_AFTERNOON:
+        return 13 <= hour < 18
+    return True
+
+
+def find_available_slots(
+    date: str,
+    period: Optional[str],
+    service_name: str = "Consulta",
+    limit: int = 3,
+) -> List[str]:
+    slots = get_available_slots_for_service(service_name, date)
+    normalized_period = normalize_period(period)
+    filtered = [slot for slot in slots if _slot_matches_period(slot, normalized_period)]
+    return filtered[:limit]
 
 
 def get_next_available_slot(service_name: str, day: str) -> Optional[str]:
