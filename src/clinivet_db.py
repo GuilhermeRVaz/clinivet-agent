@@ -108,6 +108,18 @@ def get_lead_by_phone(phone: str) -> Optional[dict]:
     return response.data[0]
 
 
+def get_pets_by_phone(phone: str) -> List[dict]:
+    response = (
+        get_supabase_client()
+        .table("pets")
+        .select("*")
+        .eq("tutor_phone", phone)
+        .order("created_at")
+        .execute()
+    )
+    return response.data or []
+
+
 def upsert_pet_profile(
     tutor_phone: str,
     name: str,

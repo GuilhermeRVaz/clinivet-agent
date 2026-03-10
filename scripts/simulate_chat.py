@@ -1,5 +1,6 @@
 import argparse
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -15,6 +16,11 @@ from src.clinivet_brain import clinivet_agent  # noqa: E402
 
 def load_environment() -> None:
     load_dotenv(PROJECT_ROOT / ".env", override=True)
+
+
+def generate_simulator_thread_id() -> str:
+    # Gera um telefone brasileiro unico por execucao para evitar contexto preso no simulador.
+    return f"55149{secrets.randbelow(90000000) + 10000000}"
 
 
 def extract_assistant_message(result: dict) -> str:
@@ -51,6 +57,7 @@ def print_debug_info(result: dict) -> None:
 
 def run_simulator(thread_id: str, debug: bool) -> None:
     print("Simulador Clinivet iniciado. Digite 'exit' para encerrar.")
+    print(f"Telefone/thread_id desta sessao: {thread_id}")
 
     while True:
         try:
@@ -86,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--thread-id",
-        default=os.getenv("SIMULATOR_THREAD_ID", "5514999999999"),
+        default=None,
         help="Thread ID usado para manter o contexto da conversa.",
     )
     parser.add_argument(
@@ -100,4 +107,5 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     load_environment()
-    run_simulator(thread_id=args.thread_id, debug=args.debug)
+    thread_id = args.thread_id or os.getenv("SIMULATOR_THREAD_ID") or generate_simulator_thread_id()
+    run_simulator(thread_id=thread_id, debug=args.debug)

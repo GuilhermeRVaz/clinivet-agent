@@ -284,6 +284,8 @@ def test_parse_natural_date_supports_common_inputs():
     assert parse_natural_date("dia 13", reference=reference) == "2026-03-13"
     assert parse_natural_date("13/02/2026", reference=reference) == "2026-02-13"
     assert parse_natural_date("13 de fevereiro", reference=reference) == "2027-02-13"
+    assert parse_natural_date("semana que vem", reference=reference) == "2026-03-16"
+    assert parse_natural_date("fim do mes que vem", reference=reference) == "2026-04-30"
 
 
 def test_extract_appointment_id_ignores_dates():
@@ -486,6 +488,78 @@ def test_post_confirmation_does_not_restart_triage(monkeypatch):
     )
 
     assert "ja esta confirmado" in follow_up["assistant_message"]
+
+
+def test_post_confirmation_allows_explicit_new_schedule_request(monkeypatch):
+    thread_id = "5514999991011"
+    fake_calendar = FakeCalendarService()
+
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        DummyStructuredLLM(
+            TriageOutput(
+                tutor_name="Joao",
+                pet_name="Rex",
+                pet_species="Cao",
+                urgency_level="routine",
+                service_suggested="Vacinacao",
+                phone="14999999999",
+            )
+        ),
+    )
+    monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 1)
+    monkeypatch.setattr("src.clinivet_brain.upsert_pet_profile", lambda **_kwargs: {"id": 55})
+    monkeypatch.setattr(
+        "src.clinivet_brain.find_available_slots",
+        lambda date, period, service_name="Consulta": ["09:00", "09:30", "10:30"],
+    )
+    monkeypatch.setattr("src.clinivet_brain.has_appointment_for_lead", lambda _lead_id: False)
+    monkeypatch.setattr("src.clinivet_brain.get_service_id_by_name", lambda _name: 10)
+    monkeypatch.setattr("src.clinivet_brain.confirm_appointment", lambda **_kwargs: {"id": 123})
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_calendar_service", lambda *_args, **_kwargs: fake_calendar
+    )
+    monkeypatch.setattr("src.clinivet_brain.set_appointment_google_event_id", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("src.clinivet_brain.update_lead_status", lambda _lead_id, _status: True)
+    monkeypatch.setattr("src.clinivet_brain.build_slot_datetime", _slot_datetime)
+    monkeypatch.setattr("src.clinivet_brain.build_next_business_day", lambda reference=None: "2030-01-01")
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_lead_by_phone",
+        lambda _phone: {
+            "id": 1,
+            "tutor_name": "Joao",
+            "tutor_cpf": "11122233344",
+            "pet_name": "Rex",
+            "pet_species": "Cao",
+            "phone": "14999999999",
+        },
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_pets_by_phone",
+        lambda _phone: [{"id": 55, "name": "Rex", "species": "Cao"}],
+    )
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="Quero consulta de manha para o Rex. Meu nome e Joao.")],
+            "thread_id": thread_id,
+        },
+        config=config,
+    )
+    clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="09:30")], "thread_id": thread_id},
+        config=config,
+    )
+
+    follow_up = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="quero agendar vacinacao pro rex dia 19/03/2026")], "thread_id": thread_id},
+        config=config,
+    )
+
+    assert "ja esta confirmado" not in follow_up["assistant_message"]
+    assert "09:00" in follow_up["assistant_message"]
 
 
 def test_cancel_uses_latest_active_appointment_by_phone_when_id_is_missing(monkeypatch):

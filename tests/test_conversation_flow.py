@@ -281,3 +281,99 @@ def test_greeting_onboarding_collects_essential_fields_in_order(monkeypatch):
         config=config,
     )
     assert turn_4["assistant_message"] == "Qual e a especie do seu pet? Pode me dizer se e cao ou gato?"
+
+
+def test_existing_tutor_memory_avoids_reasking_name(monkeypatch):
+    thread_id = "5514999911111"
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        SequenceStructuredLLM(
+            [
+                TriageOutput(
+                    tutor_name=None,
+                    tutor_cpf=None,
+                    pet_name="Tigrinho",
+                    pet_species="Gato",
+                    urgency_level="routine",
+                    service_suggested="Vacinacao",
+                    phone=None,
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_lead_by_phone",
+        lambda _phone: {
+            "id": 12,
+            "tutor_name": "Antonio Jose",
+            "tutor_cpf": "11122233344",
+            "pet_name": "Tigrinho",
+            "pet_species": "Gato",
+            "phone": thread_id,
+        },
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_pets_by_phone",
+        lambda _phone: [{"id": 7, "name": "Tigrinho", "species": "Gato"}],
+    )
+    monkeypatch.setattr("src.clinivet_brain.register_lead", lambda **_kwargs: 90)
+    monkeypatch.setattr("src.clinivet_brain.upsert_pet_profile", lambda **_kwargs: {"id": 7})
+    monkeypatch.setattr(
+        "src.clinivet_brain.resolve_scheduling_context",
+        lambda _service_name, preferred_day=None: ("Vacinacao", preferred_day or "2030-01-01", ["10:00"]),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_calendar_service", lambda *_args, **_kwargs: FakeCalendarService()
+    )
+    monkeypatch.setattr("src.clinivet_brain.get_service_id_by_name", lambda _name: 5)
+    monkeypatch.setattr("src.clinivet_brain.has_appointment_for_lead", lambda _lead_id: False)
+    monkeypatch.setattr("src.clinivet_brain.confirm_appointment", lambda **_kwargs: {"id": 501})
+    monkeypatch.setattr("src.clinivet_brain.set_appointment_google_event_id", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr("src.clinivet_brain.update_lead_status", lambda _lead_id, _status: True)
+    monkeypatch.setattr(
+        "src.clinivet_brain.build_slot_datetime",
+        lambda day, slot: pytz.timezone("America/Sao_Paulo").localize(
+            datetime.strptime(f"{day} {slot}", "%Y-%m-%d %H:%M")
+        ),
+    )
+
+    result = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="quero agendar vacina pro tigrinho")], "thread_id": thread_id},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "Qual e o seu nome?" not in result["assistant_message"]
+    assert "Agendamento confirmado" in result["assistant_message"]
+
+
+def test_multi_pet_request_asks_to_handle_one_pet_at_a_time(monkeypatch):
+    thread_id = "5514999922222"
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        SequenceStructuredLLM(
+            [
+                TriageOutput(
+                    tutor_name="Antonio Jose",
+                    tutor_cpf="11122233344",
+                    pet_name="Tigrinho, Felix, Meiudu",
+                    pet_species="Desconhecido",
+                    urgency_level="routine",
+                    service_suggested="Vacinacao",
+                    phone=None,
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.clinivet_brain.get_lead_by_phone", lambda _phone: None)
+    monkeypatch.setattr("src.clinivet_brain.get_pets_by_phone", lambda _phone: [])
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="quero agendar a vacinacao do tigrinho, do felix e do meiudu")],
+            "thread_id": thread_id,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "varios pets" in result["assistant_message"]
+    assert "qual pet voce quer agendar primeiro" in result["assistant_message"].lower()

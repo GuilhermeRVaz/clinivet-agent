@@ -1,4 +1,6 @@
 import re
+import unicodedata
+from calendar import monthrange
 from datetime import datetime, timedelta
 from typing import Iterable, List, Optional
 
@@ -21,6 +23,25 @@ HISTORY_KEYWORDS = ("historico", "prontuario", "vacinas aplicadas", "consultas a
 SLOT_SUGGESTION_KEYWORDS = ("horario", "horarios", "disponivel", "disponiveis")
 CLOSING_KEYWORDS = ("obrigado", "obrigada", "valeu", "tchau", "ate logo", "até logo")
 GREETING_KEYWORDS = ("bom dia", "boa tarde", "boa noite", "oi", "ola", "olá")
+GREETING_FILLER_WORDS = ("oi", "ola", "bom", "dia", "boa", "tarde", "noite", "tudo", "bem")
+APPOINTMENT_ID_HINTS = ("id", "agendamento", "consulta", "atendimento")
+FRUSTRATION_KEYWORDS = (
+    "ta dificil",
+    "esta dificil",
+    "que chato",
+    "vou procurar outra clinica",
+    "vou procurar outra clínica",
+    "desisto",
+    "nao gostei",
+)
+SPECIFIC_SERVICE_KEYWORDS = ("vacin", "banho", "tosa", "retorno", "emerg")
+NEW_BOOKING_QUALIFIERS = ("outro pet", "outro atendimento", "nova consulta", "novo agendamento")
+
+
+def _normalize_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text or "")
+    without_accents = "".join(char for char in normalized if unicodedata.category(char) != "Mn")
+    return without_accents.lower().strip()
 
 
 def get_latest_human_message(messages: Iterable[object]) -> str:
@@ -31,7 +52,7 @@ def get_latest_human_message(messages: Iterable[object]) -> str:
 
 
 def detect_intent(message: str, pending_action: Optional[str] = None) -> str:
-    text = (message or "").strip().lower()
+    text = _normalize_text(message)
 
     if pending_action == "confirm_slot":
         return "schedule"
@@ -58,20 +79,50 @@ def detect_intent(message: str, pending_action: Optional[str] = None) -> str:
 
 
 def is_conversation_closing(text: str) -> bool:
-    normalized = (text or "").strip().lower()
+    normalized = _normalize_text(text)
     return any(keyword in normalized for keyword in CLOSING_KEYWORDS)
 
 
+def is_user_frustrated(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(keyword in normalized for keyword in FRUSTRATION_KEYWORDS)
+
+
+def is_explicit_new_schedule_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if detect_intent(normalized) != "schedule":
+        return False
+
+    if parse_natural_date(normalized) or extract_time_preference(normalized):
+        return True
+    if any(keyword in normalized for keyword in SPECIFIC_SERVICE_KEYWORDS):
+        return True
+    if any(keyword in normalized for keyword in NEW_BOOKING_QUALIFIERS):
+        return True
+    if len(split_pet_names(text)) > 1:
+        return True
+    if re.search(r"\bpro\b|\bpara o\b|\bpara a\b|\bdo\b|\bda\b", normalized):
+        return True
+
+    return False
+
+
 def is_greeting_only(text: str) -> bool:
-    normalized = (text or "").strip().lower()
+    normalized = _normalize_text(text)
     if not normalized:
         return False
-    compact = re.sub(r"[!,.?;:]+", "", normalized).strip()
-    return compact in GREETING_KEYWORDS
+    if detect_intent(normalized) != "triage":
+        return False
+
+    compact = re.sub(r"[!,.?;:]+", " ", normalized)
+    for keyword in GREETING_KEYWORDS:
+        compact = compact.replace(keyword, " ")
+    remaining_tokens = [token for token in compact.split() if token not in GREETING_FILLER_WORDS]
+    return not remaining_tokens
 
 
 def build_greeting_message(text: str) -> str:
-    normalized = (text or "").strip().lower()
+    normalized = _normalize_text(text)
     if "boa tarde" in normalized:
         greeting = "Boa tarde!"
     elif "boa noite" in normalized:
@@ -87,7 +138,7 @@ def build_greeting_message(text: str) -> str:
 
 
 def extract_time_preference(message: str) -> Optional[str]:
-    text = (message or "").lower()
+    text = _normalize_text(message)
     if "manha" in text or "manha" in text:
         return "morning"
     if "tarde" in text:
@@ -102,21 +153,15 @@ def normalize_time_input(raw_value: str) -> Optional[str]:
     if not text:
         return None
 
-    hour_only_match = re.fullmatch(r"([01]?\d|2[0-3])\s*h?", text)
+    text_without_dates = re.sub(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", " ", text)
+    stripped_text = text_without_dates.strip()
+
+    hour_only_match = re.fullmatch(r"([01]?\d|2[0-3])\s*h?", stripped_text)
     if hour_only_match:
         hour = int(hour_only_match.group(1))
         return f"{hour:02d}:00"
 
-    separated_match = re.search(r"\b([01]?\d|2[0-3])\s*[:h\.]\s*(\d{1,2})\b", text)
-    if separated_match:
-        hour = int(separated_match.group(1))
-        minute_text = separated_match.group(2)
-        minute = int(minute_text) * 10 if len(minute_text) == 1 else int(minute_text)
-        if 0 <= minute <= 59:
-            return f"{hour:02d}:{minute:02d}"
-        return None
-
-    compact_match = re.search(r"\b(\d{3,4})\b", text)
+    compact_match = re.fullmatch(r"(\d{3,4})", stripped_text)
     if compact_match:
         compact = compact_match.group(1)
         if len(compact) == 3:
@@ -128,6 +173,15 @@ def normalize_time_input(raw_value: str) -> Optional[str]:
         if 0 <= hour <= 23 and 0 <= minute <= 59:
             return f"{hour:02d}:{minute:02d}"
 
+    separated_match = re.search(r"(?<!\d)([01]?\d|2[0-3])\s*[:h\.]\s*(\d{1,2})(?!\d)", text_without_dates)
+    if separated_match:
+        hour = int(separated_match.group(1))
+        minute_text = separated_match.group(2)
+        minute = int(minute_text) * 10 if len(minute_text) == 1 else int(minute_text)
+        if 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return None
+
     return None
 
 
@@ -136,11 +190,31 @@ def extract_time_choice(message: str) -> Optional[str]:
 
 
 def parse_natural_date(text: str, reference: Optional[datetime] = None) -> Optional[str]:
-    raw_text = (text or "").strip().lower()
+    raw_text = _normalize_text(text)
     if not raw_text:
         return None
 
     now = reference or datetime.now(TIMEZONE)
+    if "semana que vem" in raw_text or "proxima semana" in raw_text:
+        days_until_next_monday = (7 - now.weekday()) or 7
+        return (now + timedelta(days=days_until_next_monday)).strftime("%Y-%m-%d")
+
+    if "fim do mes que vem" in raw_text or "fim do mes seguinte" in raw_text:
+        year = now.year + (1 if now.month == 12 else 0)
+        month = 1 if now.month == 12 else now.month + 1
+        last_day = monthrange(year, month)[1]
+        return datetime(year, month, last_day).strftime("%Y-%m-%d")
+
+    if "fim do mes" in raw_text:
+        last_day = monthrange(now.year, now.month)[1]
+        candidate = datetime(now.year, now.month, last_day)
+        if candidate.date() < now.date():
+            year = now.year + (1 if now.month == 12 else 0)
+            month = 1 if now.month == 12 else now.month + 1
+            last_day = monthrange(year, month)[1]
+            candidate = datetime(year, month, last_day)
+        return candidate.strftime("%Y-%m-%d")
+
     normalized = (
         raw_text.replace("amanha", "amanha")
         .replace("manha", "manha")
@@ -235,13 +309,20 @@ def parse_natural_date(text: str, reference: Optional[datetime] = None) -> Optio
 
 
 def extract_appointment_id(message: str) -> Optional[int]:
-    text = (message or "").lower()
+    text = _normalize_text(message)
     normalized_time = extract_time_choice(text)
     explicit_time_marker = any(marker in text for marker in (":", "h", "."))
     compact_time_digits = bool(re.fullmatch(r"\s*\d{3,4}\s*", text))
     if normalized_time and (explicit_time_marker or compact_time_digits):
         return None
-    match = re.search(r"\b(?:id\s*)?(\d{1,10})\b", text)
+
+    if not any(hint in text for hint in APPOINTMENT_ID_HINTS):
+        return None
+
+    match = re.search(
+        r"\b(?:id|agendamento|consulta|atendimento)\s*(?:numero|n)?\s*#?\s*(\d{1,10})\b",
+        text,
+    )
     if not match:
         return None
     try:
@@ -250,8 +331,30 @@ def extract_appointment_id(message: str) -> Optional[int]:
         return None
 
 
+def split_pet_names(raw_value: Optional[str]) -> List[str]:
+    text = (raw_value or "").strip()
+    if not text:
+        return []
+
+    separators_normalized = re.sub(r"\s+e\s+", ",", text, flags=re.IGNORECASE)
+    candidates = [part.strip(" ,.;") for part in separators_normalized.split(",")]
+    candidates = [candidate for candidate in candidates if candidate]
+    if len(candidates) <= 1:
+        return candidates
+
+    unique_candidates: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
 def wants_slot_suggestions(message: str) -> bool:
-    text = (message or "").lower()
+    text = _normalize_text(message)
     return any(keyword in text for keyword in SLOT_SUGGESTION_KEYWORDS)
 
 
