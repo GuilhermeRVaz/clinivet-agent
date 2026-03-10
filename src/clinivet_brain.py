@@ -24,6 +24,7 @@ from src.clinivet_db import (
 )
 from src.models.triage_model import TriageOutput
 from src.services.conversation_service import (
+    build_greeting_message,
     detect_intent,
     extract_appointment_id,
     parse_natural_date,
@@ -34,6 +35,7 @@ from src.services.conversation_service import (
     format_slots_message,
     get_latest_human_message,
     is_conversation_closing,
+    is_greeting_only,
     wants_slot_suggestions,
 )
 from src.services.pet_history_service import load_pet_history
@@ -65,6 +67,7 @@ Voce e o assistente da Clinivet Lins da Dra. Daniely.
 
 Extract from conversation:
 - tutor_name
+- tutor_cpf
 - pet_name
 - pet_species (Cao, Gato, or Desconhecido)
 - urgency_level
@@ -93,6 +96,7 @@ Rules:
 - Otherwise set urgency_level = "routine".
 - service_suggested cannot be empty. If unclear, use "Consulta".
 - Never fabricate phone numbers. If the user did not provide a phone, return null.
+- Never fabricate CPF numbers. If the user did not provide a CPF, return null.
 - symptoms_summary must be short and in Portuguese.
 """
 
@@ -128,6 +132,7 @@ class ClinivetState(TypedDict, total=False):
     selected_appointment_id: Optional[int]
     pending_action: Optional[str]
     conversation_completed: Optional[bool]
+    onboarding_started: Optional[bool]
     user_appointments: Optional[List[dict]]
     pet_history: Optional[dict]
     assistant_message: Optional[str]
@@ -220,6 +225,23 @@ def triage_node(state: ClinivetState):
         "selected_appointment_id"
     )
     conversation_completed = bool(state.get("conversation_completed"))
+    onboarding_started = bool(state.get("onboarding_started"))
+
+    if (
+        not state.get("triage_data")
+        and not state.get("lead_id")
+        and not pending_action
+        and is_greeting_only(latest_message)
+    ):
+        greeting_message = _respond("greeting", build_greeting_message(latest_message))
+        return {
+            "assistant_message": greeting_message,
+            "messages": [AIMessage(content=greeting_message)],
+            "intent": "greeting",
+            "next_step": "end",
+            "pending_action": "awaiting_initial_request",
+            "onboarding_started": True,
+        }
 
     if conversation_completed and intent not in {
         "cancel",
@@ -271,6 +293,7 @@ def triage_node(state: ClinivetState):
             "selected_appointment_id": selected_appointment_id,
             "pending_action": pending_action,
             "conversation_completed": conversation_completed,
+            "onboarding_started": onboarding_started,
         }
 
     if pending_action == "confirm_slot" and selected_slot:
@@ -283,6 +306,7 @@ def triage_node(state: ClinivetState):
             "detected_date": detected_date,
             "selected_appointment_id": selected_appointment_id,
             "conversation_completed": conversation_completed,
+            "onboarding_started": onboarding_started,
         }
 
     if pending_action == "awaiting_time_preference":
@@ -293,12 +317,14 @@ def triage_node(state: ClinivetState):
                 "time_preference": time_preference,
                 "detected_date": detected_date,
                 "conversation_completed": conversation_completed,
+                "onboarding_started": onboarding_started,
             }
         return {
             "intent": "schedule",
             "next_step": "ask_time_preference",
             "detected_date": detected_date,
             "conversation_completed": conversation_completed,
+            "onboarding_started": onboarding_started,
         }
 
     if pending_action == "awaiting_reschedule_date":
@@ -310,6 +336,7 @@ def triage_node(state: ClinivetState):
                 "selected_appointment_id": selected_appointment_id,
                 "pending_action": "reschedule_appointment",
                 "conversation_completed": conversation_completed,
+                "onboarding_started": onboarding_started,
             }
         return {
             "intent": "reschedule",
@@ -317,6 +344,7 @@ def triage_node(state: ClinivetState):
             "selected_appointment_id": selected_appointment_id,
             "pending_action": "awaiting_reschedule_date",
             "conversation_completed": conversation_completed,
+            "onboarding_started": onboarding_started,
         }
 
     if structured_llm is None:
@@ -341,7 +369,11 @@ def triage_node(state: ClinivetState):
 
     logger.info("TRIAGE RESULT: %s", triage_result.model_dump())
 
-    missing_fields = get_missing_required_fields(triage_result, state.get("thread_id"))
+    missing_fields = get_missing_required_fields(
+        triage_result,
+        state.get("thread_id"),
+        require_onboarding_fields=onboarding_started,
+    )
     if missing_fields:
         return {
             "triage_data": triage_result,
@@ -352,6 +384,7 @@ def triage_node(state: ClinivetState):
             "time_preference": time_preference,
             "detected_date": detected_date,
             "assistant_message": None,
+            "onboarding_started": onboarding_started,
         }
 
     lead_id = state.get("lead_id")
@@ -359,6 +392,7 @@ def triage_node(state: ClinivetState):
         try:
             lead_id = register_lead(
                 tutor_name=triage_result.tutor_name,
+                tutor_cpf=triage_result.tutor_cpf,
                 pet_name=triage_result.pet_name,
                 pet_species=triage_result.pet_species,
                 phone=triage_result.phone or UNKNOWN_PHONE,
@@ -425,6 +459,7 @@ def triage_node(state: ClinivetState):
         "selected_appointment_id": selected_appointment_id,
         "pending_action": None,
         "conversation_completed": conversation_completed,
+        "onboarding_started": onboarding_started,
         "next_step": next_step,
     }
     if emergency_messages:

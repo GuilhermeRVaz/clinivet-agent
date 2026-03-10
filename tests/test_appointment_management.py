@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage
 
 from src.clinivet_brain import TriageOutput, clinivet_agent
 from src.services.conversation_service import (
+    extract_appointment_id,
     is_conversation_closing,
     normalize_time_input,
     parse_natural_date,
@@ -285,6 +286,12 @@ def test_parse_natural_date_supports_common_inputs():
     assert parse_natural_date("13 de fevereiro", reference=reference) == "2027-02-13"
 
 
+def test_extract_appointment_id_ignores_dates():
+    assert extract_appointment_id("remarcar 19/03/2026") is None
+    assert extract_appointment_id("cancelar dia 13") is None
+    assert extract_appointment_id("agendamento 42") == 42
+
+
 def test_reschedule_intent_switch_asks_for_new_date(monkeypatch):
     thread_id = "5514999991005"
 
@@ -311,6 +318,35 @@ def test_reschedule_intent_switch_asks_for_new_date(monkeypatch):
 
     assert result["intent"] == "reschedule"
     assert result["assistant_message"] == "Claro! Vamos remarcar a consulta do seu pet. Qual novo dia voce prefere?"
+
+
+def test_reschedule_date_message_does_not_detect_fake_time(monkeypatch):
+    thread_id = "5514999991010"
+
+    appointment = {
+        "id": 20,
+        "service_name": "Consulta",
+        "duration_minutes": 30,
+        "appointment_time": "2030-01-01T09:00:00-03:00",
+        "google_event_id": "evt_reschedule",
+        "pet_name": "Luna",
+    }
+
+    monkeypatch.setattr("src.clinivet_brain.get_user_appointments", lambda _phone: [appointment])
+    monkeypatch.setattr("src.clinivet_brain.get_appointment_by_id", lambda _appointment_id: None)
+    monkeypatch.setattr("src.clinivet_brain.get_active_appointment_by_phone", lambda _phone: appointment)
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="remarcar 19/03/2026")],
+            "thread_id": thread_id,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert result["detected_date"] == "2026-03-19"
+    assert result["detected_time"] is None
+    assert "Voce prefere atendimento pela manha" in result["assistant_message"]
 
 
 def test_is_valid_schedule_date_rejects_past_date():

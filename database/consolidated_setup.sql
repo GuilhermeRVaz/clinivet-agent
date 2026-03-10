@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS leads (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
 
     tutor_name TEXT NOT NULL,
+    tutor_cpf TEXT,
     pet_name TEXT NOT NULL,
     pet_species TEXT NOT NULL,
     pet_weight DOUBLE PRECISION,
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS leads (
 
 CREATE INDEX IF NOT EXISTS idx_leads_phone
 ON leads(phone);
+
+CREATE INDEX IF NOT EXISTS idx_leads_tutor_cpf
+ON leads(tutor_cpf);
 
 CREATE INDEX IF NOT EXISTS idx_leads_status
 ON leads(status);

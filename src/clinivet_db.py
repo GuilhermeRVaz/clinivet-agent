@@ -60,6 +60,7 @@ def get_supabase_client() -> Client:
 
 def register_lead(
     tutor_name: str,
+    tutor_cpf: Optional[str],
     pet_name: str,
     pet_species: str,
     phone: str,
@@ -70,6 +71,7 @@ def register_lead(
 ) -> int:
     data = {
         "tutor_name": tutor_name,
+        "tutor_cpf": tutor_cpf,
         "pet_name": pet_name,
         "pet_species": pet_species,
         "phone": phone,

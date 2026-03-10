@@ -20,6 +20,7 @@ CHECK_KEYWORDS = (
 HISTORY_KEYWORDS = ("historico", "prontuario", "vacinas aplicadas", "consultas anteriores")
 SLOT_SUGGESTION_KEYWORDS = ("horario", "horarios", "disponivel", "disponiveis")
 CLOSING_KEYWORDS = ("obrigado", "obrigada", "valeu", "tchau", "ate logo", "até logo")
+GREETING_KEYWORDS = ("bom dia", "boa tarde", "boa noite", "oi", "ola", "olá")
 
 
 def get_latest_human_message(messages: Iterable[object]) -> str:
@@ -59,6 +60,30 @@ def detect_intent(message: str, pending_action: Optional[str] = None) -> str:
 def is_conversation_closing(text: str) -> bool:
     normalized = (text or "").strip().lower()
     return any(keyword in normalized for keyword in CLOSING_KEYWORDS)
+
+
+def is_greeting_only(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    compact = re.sub(r"[!,.?;:]+", "", normalized).strip()
+    return compact in GREETING_KEYWORDS
+
+
+def build_greeting_message(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    if "boa tarde" in normalized:
+        greeting = "Boa tarde!"
+    elif "boa noite" in normalized:
+        greeting = "Boa noite!"
+    else:
+        greeting = "Bom dia!" if "bom dia" in normalized else "Ola!"
+
+    return (
+        f"{greeting} Sou a assistente virtual da Clinica Clinivet e vou fazer seu atendimento hoje. "
+        "Vou precisar de alguns dados essenciais para te atender melhor: nome completo do tutor, CPF, nome do pet e especie. "
+        "Como posso te ajudar?"
+    )
 
 
 def extract_time_preference(message: str) -> Optional[str]:

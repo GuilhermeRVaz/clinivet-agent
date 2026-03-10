@@ -10,6 +10,8 @@ REQUIRED_FIELDS_FOR_APPOINTMENT = ["pet_name", "tutor_name", "phone"]
 MISSING_FIELD_QUESTIONS = {
     "pet_name": "Entendi. Qual e o nome do seu pet?",
     "tutor_name": "Perfeito. Qual e o seu nome?",
+    "tutor_cpf": "Para continuar, voce pode me informar o CPF do tutor?",
+    "pet_species": "Qual e a especie do seu pet? Pode me dizer se e cao ou gato?",
     "phone": "Voce poderia me informar um telefone para contato?",
 }
 
@@ -31,6 +33,16 @@ def extract_phone_candidate(raw_value: Optional[str]) -> Optional[str]:
     return digits
 
 
+def normalize_cpf(raw_value: Optional[str]) -> Optional[str]:
+    cleaned = clean_text(raw_value)
+    if not cleaned:
+        return None
+    digits = re.sub(r"\D", "", cleaned)
+    if len(digits) != 11:
+        return None
+    return digits
+
+
 def classify_pet_size(weight: Optional[float]) -> str:
     if weight is None:
         return UNKNOWN_PET_SIZE
@@ -43,6 +55,7 @@ def classify_pet_size(weight: Optional[float]) -> str:
 
 def normalize_triage_result(triage: TriageOutput) -> TriageOutput:
     triage.tutor_name = clean_text(triage.tutor_name)
+    triage.tutor_cpf = normalize_cpf(triage.tutor_cpf)
     triage.pet_name = clean_text(triage.pet_name)
     triage.symptoms_summary = clean_text(triage.symptoms_summary)
     triage.service_suggested = clean_text(triage.service_suggested) or DEFAULT_SERVICE
@@ -74,6 +87,7 @@ def merge_triage_data(previous: Optional[TriageOutput], current: TriageOutput) -
 
     merged = TriageOutput(
         tutor_name=current.tutor_name or previous.tutor_name,
+        tutor_cpf=current.tutor_cpf or previous.tutor_cpf,
         pet_name=current.pet_name or previous.pet_name,
         pet_species=merged_species,
         urgency_level=(
@@ -97,15 +111,28 @@ def merge_triage_data(previous: Optional[TriageOutput], current: TriageOutput) -
     return normalize_triage_result(merged)
 
 
-def get_missing_required_fields(triage: TriageOutput, thread_id: Optional[str]) -> List[str]:
+def get_missing_required_fields(
+    triage: TriageOutput,
+    thread_id: Optional[str],
+    require_onboarding_fields: bool = False,
+) -> List[str]:
     missing: List[str] = []
     effective_phone = triage.phone or extract_phone_candidate(thread_id)
 
-    if not triage.pet_name:
-        missing.append("pet_name")
-
-    if not triage.tutor_name:
-        missing.append("tutor_name")
+    if require_onboarding_fields:
+        if not triage.tutor_name:
+            missing.append("tutor_name")
+        if not triage.tutor_cpf:
+            missing.append("tutor_cpf")
+        if not triage.pet_name:
+            missing.append("pet_name")
+        if is_species_missing(triage.pet_species):
+            missing.append("pet_species")
+    else:
+        if not triage.pet_name:
+            missing.append("pet_name")
+        if not triage.tutor_name:
+            missing.append("tutor_name")
 
     if not effective_phone:
         missing.append("phone")

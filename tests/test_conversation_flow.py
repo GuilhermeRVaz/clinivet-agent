@@ -111,3 +111,173 @@ def test_conversation_slot_filling_then_schedule(monkeypatch):
     )
     assert "Agendamento confirmado" in turn_4["assistant_message"]
     assert turn_4["lead_id"] == 77
+
+
+def test_greeting_starts_with_introduction(monkeypatch):
+    thread_id = "conversation-thread-greeting"
+
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        SequenceStructuredLLM(
+            [
+                TriageOutput(
+                    tutor_name=None,
+                    tutor_cpf=None,
+                    pet_name=None,
+                    pet_species="Desconhecido",
+                    urgency_level="routine",
+                    service_suggested="Consulta",
+                    phone=None,
+                )
+            ]
+        ),
+    )
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    greeting_turn = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="bom dia")], "thread_id": thread_id},
+        config=config,
+    )
+
+    assert "assistente virtual da Clinica Clinivet" in greeting_turn["assistant_message"]
+    assert "Como posso te ajudar?" in greeting_turn["assistant_message"]
+
+
+def test_compound_greeting_starts_with_introduction(monkeypatch):
+    thread_id = "conversation-thread-greeting-compound"
+
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        SequenceStructuredLLM(
+            [
+                TriageOutput(
+                    tutor_name=None,
+                    tutor_cpf=None,
+                    pet_name=None,
+                    pet_species="Desconhecido",
+                    urgency_level="routine",
+                    service_suggested="Consulta",
+                    phone=None,
+                )
+            ]
+        ),
+    )
+
+    greeting_turn = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="ola bom dia")], "thread_id": thread_id},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "assistente virtual da Clinica Clinivet" in greeting_turn["assistant_message"]
+    assert greeting_turn["intent"] == "greeting"
+
+
+def test_greeting_onboarding_requests_tutor_name_first(monkeypatch):
+    thread_id = "conversation-thread-onboarding"
+    llm_sequence = SequenceStructuredLLM(
+        [
+            TriageOutput(
+                tutor_name=None,
+                tutor_cpf=None,
+                pet_name=None,
+                pet_species="Desconhecido",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone=None,
+            )
+        ]
+    )
+
+    monkeypatch.setattr("src.clinivet_brain.structured_llm", llm_sequence)
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="boa tarde")], "thread_id": thread_id},
+        config=config,
+    )
+
+    second_turn = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="Quero marcar consulta")], "thread_id": thread_id},
+        config=config,
+    )
+
+    assert second_turn["assistant_message"] == "Perfeito. Qual e o seu nome?"
+
+
+def test_greeting_onboarding_collects_essential_fields_in_order(monkeypatch):
+    thread_id = "conversation-thread-onboarding-order"
+    llm_sequence = SequenceStructuredLLM(
+        [
+            TriageOutput(
+                tutor_name=None,
+                tutor_cpf=None,
+                pet_name=None,
+                pet_species="Desconhecido",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone=None,
+            ),
+            TriageOutput(
+                tutor_name="Padre Pedro",
+                tutor_cpf=None,
+                pet_name=None,
+                pet_species="Desconhecido",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone=None,
+            ),
+            TriageOutput(
+                tutor_name=None,
+                tutor_cpf="444.232.543-22",
+                pet_name=None,
+                pet_species="Desconhecido",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone=None,
+            ),
+            TriageOutput(
+                tutor_name=None,
+                tutor_cpf=None,
+                pet_name="Riuden",
+                pet_species="Desconhecido",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone=None,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr("src.clinivet_brain.structured_llm", llm_sequence)
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="boa tarde")], "thread_id": thread_id},
+        config=config,
+    )
+
+    turn_1 = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="Quero marcar consulta")], "thread_id": thread_id},
+        config=config,
+    )
+    assert turn_1["assistant_message"] == "Perfeito. Qual e o seu nome?"
+
+    turn_2 = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="Padre Pedro")], "thread_id": thread_id},
+        config=config,
+    )
+    assert turn_2["assistant_message"] == "Para continuar, voce pode me informar o CPF do tutor?"
+
+    turn_3 = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="444.232.543-22")], "thread_id": thread_id},
+        config=config,
+    )
+    assert turn_3["assistant_message"] == "Entendi. Qual e o nome do seu pet?"
+
+    turn_4 = clinivet_agent.invoke(
+        {"messages": [HumanMessage(content="Riuden")], "thread_id": thread_id},
+        config=config,
+    )
+    assert turn_4["assistant_message"] == "Qual e a especie do seu pet? Pode me dizer se e cao ou gato?"

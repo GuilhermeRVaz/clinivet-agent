@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class TriageOutput(BaseModel):
     tutor_name: Optional[str] = None
+    tutor_cpf: Optional[str] = None
     pet_name: Optional[str] = None
     pet_species: Literal["Cão", "Cao", "Gato", "Desconhecido"] = "Desconhecido"
     urgency_level: Literal["emergency", "routine"] = "routine"
