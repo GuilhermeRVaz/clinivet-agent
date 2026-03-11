@@ -8,7 +8,18 @@ from langchain_core.messages import HumanMessage
 
 from src.clinivet_calendar import TIMEZONE
 
-SCHEDULE_KEYWORDS = ("agendar", "marcar", "consulta", "retorno", "vacina", "vacinacao")
+SCHEDULE_KEYWORDS = (
+    "agendar",
+    "marcar",
+    "consulta",
+    "retorno",
+    "vacina",
+    "vacinacao",
+    "banho",
+    "tosa",
+    "acupuntura",
+    "atendimento",
+)
 CANCEL_KEYWORDS = ("cancelar", "desmarcar")
 RESCHEDULE_KEYWORDS = ("remarcar", "reagendar", "mudar horario", "trocar horario")
 DATE_CHANGE_KEYWORDS = ("mudar o dia", "trocar o dia", "outro dia", "novo dia")
@@ -351,6 +362,27 @@ def split_pet_names(raw_value: Optional[str]) -> List[str]:
         seen.add(lowered)
         unique_candidates.append(candidate)
     return unique_candidates
+
+
+def extract_multiple_pet_mentions(text: Optional[str]) -> List[str]:
+    normalized = _normalize_text(text or "")
+    if not normalized:
+        return []
+
+    matches = re.findall(r"\b(?:do|da)\s+([a-z0-9à-ÿ_-]+)", normalized)
+    unique_matches: List[str] = []
+    seen = set()
+    for match in matches:
+        cleaned = match.strip(" ,.;")
+        if not cleaned:
+            continue
+        if cleaned in {"seu", "sua", "meu", "minha"}:
+            continue
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        unique_matches.append(cleaned)
+    return unique_matches
 
 
 def wants_slot_suggestions(message: str) -> bool:

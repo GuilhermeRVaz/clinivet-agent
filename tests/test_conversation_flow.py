@@ -377,3 +377,35 @@ def test_multi_pet_request_asks_to_handle_one_pet_at_a_time(monkeypatch):
 
     assert "varios pets" in result["assistant_message"]
     assert "qual pet voce quer agendar primeiro" in result["assistant_message"].lower()
+
+
+def test_multi_pet_detection_uses_raw_message_mentions(monkeypatch):
+    thread_id = "5514999922223"
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        SequenceStructuredLLM(
+            [
+                TriageOutput(
+                    tutor_name="Antonio Jose",
+                    tutor_cpf="11122233344",
+                    pet_name="Tigrinho",
+                    pet_species="Gato",
+                    urgency_level="routine",
+                    service_suggested="Vacinacao",
+                    phone=None,
+                )
+            ]
+        ),
+    )
+    monkeypatch.setattr("src.clinivet_brain.get_lead_by_phone", lambda _phone: None)
+    monkeypatch.setattr("src.clinivet_brain.get_pets_by_phone", lambda _phone: [])
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="quero marcar a vacinacao do tigrinho, do felix e do meiudu")],
+            "thread_id": thread_id,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "varios pets" in result["assistant_message"]
