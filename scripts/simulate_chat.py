@@ -42,11 +42,17 @@ def print_debug_info(result: dict) -> None:
     selected_slot = result.get("selected_slot")
     detected_date = result.get("detected_date")
     detected_time = result.get("detected_time") or selected_slot
+    pending_action = result.get("pending_action")
+    new_schedule_active = result.get("new_schedule_active")
+    conversation_completed = result.get("conversation_completed")
 
     print("[debug] detected_intent:", intent)
     print("[debug] detected_date:", detected_date)
     print("[debug] detected_time:", detected_time)
     print("[debug] next_step:", next_step)
+    print("[debug] pending_action:", pending_action)
+    print("[debug] new_schedule_active:", new_schedule_active)
+    print("[debug] conversation_completed:", conversation_completed)
     if available_slots:
         print("[debug] slots sugeridos:", ", ".join(available_slots))
     if selected_slot:
@@ -74,13 +80,22 @@ def run_simulator(thread_id: str, debug: bool) -> None:
             break
 
         config = {"configurable": {"thread_id": thread_id}}
-        result = clinivet_agent.invoke(
-            {
-                "messages": [HumanMessage(content=user_input)],
-                "thread_id": thread_id,
-            },
-            config=config,
-        )
+        try:
+            result = clinivet_agent.invoke(
+                {
+                    "messages": [HumanMessage(content=user_input)],
+                    "thread_id": thread_id,
+                },
+                config=config,
+            )
+        except Exception as exc:
+            print(
+                "Bot: Tive um problema temporario para processar sua mensagem. "
+                "Pode tentar novamente?"
+            )
+            if debug:
+                print("[debug] erro:", repr(exc))
+            continue
 
         print(f"Bot: {extract_assistant_message(result)}")
         if debug:

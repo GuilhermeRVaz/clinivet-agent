@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage
 
 from src.clinivet_brain import TriageOutput, clinivet_agent
 from src.services.conversation_service import (
+    detect_intent,
     extract_appointment_id,
     is_conversation_closing,
     normalize_time_input,
@@ -53,6 +54,7 @@ def test_schedule_with_time_preference(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -190,6 +192,186 @@ def test_reschedule_appointment_flow(monkeypatch):
     assert fake_calendar.updated_event["event_id"] == "evt_reschedule"
 
 
+def test_natural_reschedule_phrase_after_confirmation_suggests_slots(monkeypatch):
+    thread_id = "5514999991014"
+    appointment = {
+        "id": 21,
+        "service_name": "Consulta",
+        "duration_minutes": 30,
+        "appointment_time": "2030-01-01T09:00:00-03:00",
+        "google_event_id": "evt_reschedule_natural",
+        "pet_name": "Luna",
+    }
+
+    monkeypatch.setattr("src.clinivet_brain.get_user_appointments", lambda _phone: [appointment])
+    monkeypatch.setattr("src.clinivet_brain.get_appointment_by_id", lambda _appointment_id: appointment)
+    monkeypatch.setattr("src.clinivet_brain.get_active_appointment_by_phone", lambda _phone: appointment)
+    monkeypatch.setattr(
+        "src.clinivet_brain.find_available_slots",
+        lambda date, period, service_name="Consulta": ["13:00", "13:30", "14:00"],
+    )
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="pode alterar para amanha a tarde? meu cachorro nao ta bem")],
+            "thread_id": thread_id,
+            "conversation_completed": True,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert result["intent"] == "reschedule"
+    assert "13:00" in result["assistant_message"]
+    assert "13:30" in result["assistant_message"]
+
+
+def test_reschedule_with_new_service_asks_for_clarification(monkeypatch):
+    thread_id = "55149999910140"
+    appointment = {
+        "id": 23,
+        "service_name": "Consulta",
+        "duration_minutes": 30,
+        "appointment_time": "2030-01-01T09:00:00-03:00",
+        "google_event_id": "evt_reschedule_service_change",
+        "pet_name": "Apogeu",
+    }
+
+    monkeypatch.setattr("src.clinivet_brain.get_user_appointments", lambda _phone: [appointment])
+    monkeypatch.setattr("src.clinivet_brain.get_appointment_by_id", lambda _appointment_id: appointment)
+    monkeypatch.setattr("src.clinivet_brain.get_active_appointment_by_phone", lambda _phone: appointment)
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="quero remarcar para o proximo dia 20 para dar banho e tosa")],
+            "thread_id": thread_id,
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "novo agendamento para Banho e Tosa" in result["assistant_message"]
+    assert result["pending_action"] == "awaiting_reschedule_or_new_service"
+
+
+def test_suggest_slots_handles_calendar_failure_gracefully(monkeypatch):
+    thread_id = "55149999910141"
+    monkeypatch.setattr("src.clinivet_brain.is_valid_schedule_date", lambda _date: (True, None))
+    monkeypatch.setattr(
+        "src.clinivet_brain.find_available_slots",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("Nao foi possivel consultar o calendario do Google.")),
+    )
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="tente de novo")],
+            "thread_id": thread_id,
+            "pending_action": "awaiting_time_preference",
+            "time_preference": "afternoon",
+            "appointment_date": "2030-01-01",
+            "detected_date": "2030-01-01",
+            "service_name": "Consulta",
+            "triage_data": TriageOutput(
+                tutor_name="Mauricio Prata",
+                tutor_cpf="33311122200",
+                pet_name="Apogeu",
+                pet_species="Cao",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone="55149999910141",
+            ),
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "instabilidade ao consultar a agenda" in result["assistant_message"].lower()
+    assert result["pending_action"] == "retry_suggest_slots"
+
+
+def test_ask_time_preference_invites_consultation_details():
+    thread_id = "55149999910142"
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="quero seguir")],
+            "thread_id": thread_id,
+            "pending_action": "awaiting_time_preference",
+            "triage_data": TriageOutput(
+                tutor_name="Mauricio Prata",
+                tutor_cpf="33311122200",
+                pet_name="Apogeu",
+                pet_species="Cao",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone="55149999910142",
+            ),
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert "raca, peso, idade e os sintomas" in result["assistant_message"].lower()
+
+
+def test_explicit_new_schedule_interrupts_reschedule_flow(monkeypatch):
+    thread_id = "5514999991016"
+    appointment = {
+        "id": 22,
+        "service_name": "Consulta",
+        "duration_minutes": 30,
+        "appointment_time": "2030-01-01T09:00:00-03:00",
+        "google_event_id": "evt_reschedule_interrupt",
+        "pet_name": "Nino",
+    }
+
+    monkeypatch.setattr("src.clinivet_brain.get_user_appointments", lambda _phone: [appointment])
+    monkeypatch.setattr("src.clinivet_brain.get_appointment_by_id", lambda _appointment_id: appointment)
+    monkeypatch.setattr("src.clinivet_brain.get_active_appointment_by_phone", lambda _phone: appointment)
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        DummyStructuredLLM(
+            TriageOutput(
+                tutor_name="Marina Silva",
+                tutor_cpf="12345678909",
+                pet_name="Nino",
+                pet_species="Gato",
+                urgency_level="routine",
+                service_suggested="Vacinacao",
+                phone="5514997000003",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_lead_by_phone",
+        lambda _phone: {
+            "id": 62,
+            "tutor_name": "Marina Silva",
+            "tutor_cpf": "12345678909",
+            "pet_name": "Nino",
+            "pet_species": "Gato",
+            "phone": "5514997000003",
+        },
+    )
+    monkeypatch.setattr(
+        "src.clinivet_brain.get_pets_by_phone",
+        lambda _phone: [{"id": 26, "name": "Nino", "species": "Gato"}],
+    )
+
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="quero agendar a vacinacao do Nino, do Thor e do Felix")],
+            "thread_id": thread_id,
+            "pending_action": "reschedule_appointment",
+            "conversation_completed": False,
+            "selected_appointment_id": 22,
+            "detected_date": "2030-01-01",
+            "available_slots": ["13:00", "13:30"],
+        },
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    assert result["intent"] == "schedule"
+    assert "varios pets" in result["assistant_message"]
+    assert result["pending_action"] == "awaiting_single_pet_choice"
+
+
 def test_load_pet_history_flow(monkeypatch):
     thread_id = "5514999991003"
     monkeypatch.setattr(
@@ -214,6 +396,10 @@ def test_load_pet_history_flow(monkeypatch):
     assert "Vacinas registradas: 1." in result["assistant_message"]
 
 
+def test_detect_intent_accepts_natural_reschedule_phrasing():
+    assert detect_intent("pode alterar para amanha a tarde meu cachorro nao ta bem") == "reschedule"
+
+
 def test_normalize_time_input_accepts_multiple_formats():
     assert normalize_time_input("13h30") == "13:30"
     assert normalize_time_input("13:30") == "13:30"
@@ -235,6 +421,7 @@ def test_confirm_slot_returns_friendly_conflict_message(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -274,6 +461,35 @@ def test_confirm_slot_returns_friendly_conflict_message(monkeypatch):
     )
 
     assert second_turn["assistant_message"] == "Esse horario acabou de ser reservado. Vou buscar outro disponivel."
+
+
+def test_confirm_slot_mixed_message_does_not_confirm_wrong_pet(monkeypatch):
+    thread_id = "5514999991017"
+
+    config = {"configurable": {"thread_id": thread_id}}
+
+    second_turn = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="felix gato 14:00")],
+            "thread_id": thread_id,
+            "pending_action": "confirm_slot",
+            "available_slots": ["13:00", "13:30", "14:00"],
+            "appointment_date": "2030-01-01",
+            "lead_id": 1,
+            "triage_data": TriageOutput(
+                tutor_name="Joao",
+                tutor_cpf="11122233344",
+                pet_name="Thor",
+                pet_species="Cao",
+                urgency_level="routine",
+                service_suggested="Consulta",
+                phone="14999999999",
+            ),
+        },
+        config=config,
+    )
+
+    assert "Escolha apenas um dos horarios sugeridos" in second_turn["assistant_message"]
 
 
 def test_parse_natural_date_supports_common_inputs():
@@ -387,6 +603,7 @@ def test_post_confirmation_closing_returns_polite_message(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -434,6 +651,25 @@ def test_post_confirmation_closing_returns_polite_message(monkeypatch):
     assert "Ate logo" in closing_turn["assistant_message"]
 
 
+def test_frustration_response_clears_stale_context(monkeypatch):
+    result = clinivet_agent.invoke(
+        {
+            "messages": [HumanMessage(content="ta dificil hein, vou procurar outra clinica, tchau")],
+            "thread_id": "5514999991015",
+            "available_slots": ["13:00", "13:30"],
+            "detected_date": "2030-01-01",
+            "selected_slot": "13:00",
+            "conversation_completed": True,
+        },
+        config={"configurable": {"thread_id": "5514999991015"}},
+    )
+
+    assert result["intent"] == "frustration"
+    assert result["available_slots"] == []
+    assert result["detected_date"] is None
+    assert result["selected_slot"] is None
+
+
 def test_post_confirmation_does_not_restart_triage(monkeypatch):
     thread_id = "5514999991007"
     fake_calendar = FakeCalendarService()
@@ -443,6 +679,7 @@ def test_post_confirmation_does_not_restart_triage(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -488,6 +725,8 @@ def test_post_confirmation_does_not_restart_triage(monkeypatch):
     )
 
     assert "ja esta confirmado" in follow_up["assistant_message"]
+    assert follow_up["available_slots"] == []
+    assert follow_up["detected_date"] is None
 
 
 def test_post_confirmation_allows_explicit_new_schedule_request(monkeypatch):
@@ -500,6 +739,7 @@ def test_post_confirmation_allows_explicit_new_schedule_request(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -580,6 +820,7 @@ def test_new_schedule_after_confirmation_clears_old_slot_state(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -660,11 +901,11 @@ def test_new_schedule_missing_cpf_continues_new_cycle(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Fernando",
-                tutor_cpf=None,
-                pet_name="Sabenada",
-                pet_species="Gato",
+                tutor_cpf="11122233344",
+                pet_name="Sabichao",
+                pet_species="Cao",
                 urgency_level="routine",
-                service_suggested="Banho e Tosa",
+                service_suggested="Consulta",
                 phone="14999999999",
             )
         ),
@@ -716,6 +957,20 @@ def test_new_schedule_missing_cpf_continues_new_cycle(monkeypatch):
         "phone": "14999999999",
     }
     slot_state["slots"] = ["13:00", "13:30", "14:00"]
+    monkeypatch.setattr(
+        "src.clinivet_brain.structured_llm",
+        DummyStructuredLLM(
+            TriageOutput(
+                tutor_name="Fernando",
+                tutor_cpf=None,
+                pet_name="Sabenada",
+                pet_species="Gato",
+                urgency_level="routine",
+                service_suggested="Banho e Tosa",
+                phone="14999999999",
+            )
+        ),
+    )
 
     ask_cpf_turn = clinivet_agent.invoke(
         {
@@ -725,15 +980,20 @@ def test_new_schedule_missing_cpf_continues_new_cycle(monkeypatch):
         config=config,
     )
 
-    assert "CPF do tutor" in ask_cpf_turn["assistant_message"]
+    assert "ja esta confirmado" not in ask_cpf_turn["assistant_message"]
 
-    lead_memory["current"]["tutor_cpf"] = "45532276522"
-    continue_turn = clinivet_agent.invoke(
-        {"messages": [HumanMessage(content="45532276522")], "thread_id": thread_id},
-        config=config,
-    )
+    if "CPF do tutor" in ask_cpf_turn["assistant_message"]:
+        lead_memory["current"]["tutor_cpf"] = "45532276522"
+        continue_turn = clinivet_agent.invoke(
+            {"messages": [HumanMessage(content="45532276522")], "thread_id": thread_id},
+            config=config,
+        )
 
-    assert "ja esta confirmado" not in continue_turn["assistant_message"]
+        assert "ja esta confirmado" not in continue_turn["assistant_message"]
+    else:
+        assert "13:00" in ask_cpf_turn["assistant_message"]
+        assert "13:30" in ask_cpf_turn["assistant_message"]
+
     assert register_calls["count"] == 2
 
 

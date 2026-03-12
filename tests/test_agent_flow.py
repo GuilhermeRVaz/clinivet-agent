@@ -29,6 +29,7 @@ def test_agent_flow_schedules_after_complete_data(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -76,6 +77,7 @@ def test_agent_flow_prevents_duplicate_appointment(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",

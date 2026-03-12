@@ -2,6 +2,7 @@ import re
 from typing import List, Optional
 
 from src.models.triage_model import TriageOutput
+from src.services.conversation_service import detect_species_from_message
 
 DEFAULT_SERVICE = "Consulta"
 UNKNOWN_PET_SIZE = "unknown"
@@ -140,8 +141,41 @@ def get_missing_required_fields(
     return missing
 
 
-def build_missing_data_message(missing_fields: List[str]) -> str:
+def build_missing_data_message(
+    missing_fields: List[str],
+    *,
+    guided_onboarding: bool = False,
+) -> str:
     if not missing_fields:
         return "Perfeito. Vamos continuar."
 
-    return MISSING_FIELD_QUESTIONS[missing_fields[0]]
+    question = MISSING_FIELD_QUESTIONS[missing_fields[0]]
+    if not guided_onboarding:
+        return question
+
+    return (
+        "Para agilizar seu atendimento, vou precisar de alguns dados essenciais. "
+        "Se puder, me responda de forma direta. "
+        f"{question}"
+    )
+
+
+def has_plausible_field_answer(field_name: str, message: Optional[str]) -> bool:
+    cleaned = clean_text(message)
+    if not cleaned:
+        return False
+
+    if field_name == "tutor_cpf":
+        return normalize_cpf(cleaned) is not None
+
+    if field_name == "phone":
+        return extract_phone_candidate(cleaned) is not None
+
+    if field_name == "pet_species":
+        return detect_species_from_message(cleaned) is not None
+
+    letters = re.findall(r"[A-Za-zÀ-ÿ]+", cleaned)
+    return bool(letters)
+
+
+

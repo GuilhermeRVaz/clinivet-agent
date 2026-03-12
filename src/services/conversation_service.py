@@ -21,8 +21,25 @@ SCHEDULE_KEYWORDS = (
     "atendimento",
 )
 CANCEL_KEYWORDS = ("cancelar", "desmarcar")
-RESCHEDULE_KEYWORDS = ("remarcar", "reagendar", "mudar horario", "trocar horario")
-DATE_CHANGE_KEYWORDS = ("mudar o dia", "trocar o dia", "outro dia", "novo dia")
+RESCHEDULE_KEYWORDS = (
+    "remarcar",
+    "reagendar",
+    "mudar horario",
+    "trocar horario",
+    "alterar",
+    "mudar para",
+    "trocar para",
+    "adiar",
+    "antecipar",
+)
+DATE_CHANGE_KEYWORDS = (
+    "mudar o dia",
+    "trocar o dia",
+    "outro dia",
+    "novo dia",
+    "alterar para",
+    "pode alterar",
+)
 CHECK_KEYWORDS = (
     "meu agendamento",
     "meus agendamentos",
@@ -47,6 +64,17 @@ FRUSTRATION_KEYWORDS = (
 )
 SPECIFIC_SERVICE_KEYWORDS = ("vacin", "banho", "tosa", "retorno", "emerg")
 NEW_BOOKING_QUALIFIERS = ("outro pet", "outro atendimento", "nova consulta", "novo agendamento")
+GENERIC_FILLER_KEYWORDS = ("ok", "certo", "entendi", "ta bom", "tudo bem", "beleza", "sim")
+CANINE_SPECIES_TOKENS = (
+    "cao",
+    "cachorro",
+    "cachorrinho",
+    "cachorrinha",
+    "canino",
+    "cadela",
+    "cadelinha",
+)
+FELINE_SPECIES_TOKENS = ("gato", "gatinho", "gatinha", "felino")
 
 
 def _normalize_text(text: str) -> str:
@@ -159,6 +187,34 @@ def extract_time_preference(message: str) -> Optional[str]:
     return None
 
 
+def detect_requested_service(message: str) -> Optional[str]:
+    text = _normalize_text(message)
+    if not text:
+        return None
+    if "banho" in text or "tosa" in text:
+        return "Banho e Tosa"
+    if "vacin" in text:
+        return "Vacinacao"
+    if "retorno" in text:
+        return "Retorno"
+    if "emerg" in text:
+        return "Emergencia"
+    if "consulta" in text or "atendimento" in text:
+        return "Consulta"
+    return None
+
+
+def detect_species_from_message(message: Optional[str]) -> Optional[str]:
+    normalized = _normalize_text(message or "")
+    if not normalized:
+        return None
+    if any(token in normalized for token in CANINE_SPECIES_TOKENS):
+        return "Cao"
+    if any(token in normalized for token in FELINE_SPECIES_TOKENS):
+        return "Gato"
+    return None
+
+
 def normalize_time_input(raw_value: str) -> Optional[str]:
     text = (raw_value or "").strip().lower()
     if not text:
@@ -198,6 +254,21 @@ def normalize_time_input(raw_value: str) -> Optional[str]:
 
 def extract_time_choice(message: str) -> Optional[str]:
     return normalize_time_input(message)
+
+
+def is_clean_time_choice(message: str) -> bool:
+    normalized_time = normalize_time_input(message)
+    if not normalized_time:
+        return False
+
+    stripped = _normalize_text(message)
+    return bool(
+        re.fullmatch(r"([01]?\d|2[0-3])", stripped)
+        or re.fullmatch(r"([01]?\d|2[0-3])h", stripped)
+        or re.fullmatch(r"([01]?\d|2[0-3])h\d{2}", stripped)
+        or re.fullmatch(r"([01]?\d|2[0-3])[:\.]\d{1,2}", stripped)
+        or re.fullmatch(r"\d{3,4}", stripped)
+    )
 
 
 def parse_natural_date(text: str, reference: Optional[datetime] = None) -> Optional[str]:
@@ -383,6 +454,40 @@ def extract_multiple_pet_mentions(text: Optional[str]) -> List[str]:
         seen.add(cleaned)
         unique_matches.append(cleaned)
     return unique_matches
+
+
+def extract_single_pet_choice(text: Optional[str], pet_names: List[str]) -> Optional[str]:
+    normalized = _normalize_text(text or "")
+    if not normalized or not pet_names:
+        return None
+
+    normalized_map = {_normalize_text(name): name for name in pet_names}
+    for normalized_name, original_name in normalized_map.items():
+        if normalized_name and normalized_name in normalized:
+            return original_name
+
+    ordinal_map = {
+        "primeiro": 0,
+        "1": 0,
+        "segundo": 1,
+        "2": 1,
+        "terceiro": 2,
+        "3": 2,
+    }
+    for marker, index in ordinal_map.items():
+        if re.search(rf"\b{marker}\b", normalized) and index < len(pet_names):
+            return pet_names[index]
+
+    return None
+
+
+def is_non_progress_message(text: Optional[str]) -> bool:
+    normalized = _normalize_text(text or "")
+    if not normalized:
+        return True
+    if is_greeting_only(normalized):
+        return True
+    return normalized in GENERIC_FILLER_KEYWORDS
 
 
 def wants_slot_suggestions(message: str) -> bool:

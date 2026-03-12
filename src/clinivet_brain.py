@@ -13,6 +13,7 @@ from src.clinivet_db import (
     confirm_appointment,
     get_active_appointment_by_phone,
     get_appointment_by_id,
+    get_lead_by_cpf,
     get_lead_by_phone,
     get_pets_by_phone,
     get_user_appointments,
@@ -28,7 +29,9 @@ from src.models.triage_model import TriageOutput
 from src.services.conversation_service import (
     build_greeting_message,
     detect_intent,
+    detect_requested_service,
     extract_multiple_pet_mentions,
+    extract_single_pet_choice,
     extract_appointment_id,
     parse_natural_date,
     extract_time_choice,
@@ -39,7 +42,9 @@ from src.services.conversation_service import (
     get_latest_human_message,
     is_explicit_new_schedule_request,
     is_conversation_closing,
+    is_clean_time_choice,
     is_greeting_only,
+    is_non_progress_message,
     is_user_frustrated,
     split_pet_names,
     wants_slot_suggestions,
@@ -57,6 +62,7 @@ from src.services.triage_service import (
     build_missing_data_message,
     extract_phone_candidate,
     get_missing_required_fields,
+    has_plausible_field_answer,
     merge_triage_data,
     normalize_triage_result,
 )
@@ -140,9 +146,11 @@ class ClinivetState(TypedDict, total=False):
     conversation_completed: Optional[bool]
     new_schedule_active: Optional[bool]
     onboarding_started: Optional[bool]
+    onboarding_guidance_needed: Optional[bool]
     user_appointments: Optional[List[dict]]
     pet_history: Optional[dict]
     assistant_message: Optional[str]
+    pending_pet_names: Optional[List[str]]
 
 
 def _resolve_phone_from_state(state: ClinivetState) -> Optional[str]:
@@ -166,6 +174,42 @@ def _respond(action: str, base_message: str, **context) -> str:
     return generate_conversational_response(action=action, base_message=base_message, context=context)
 
 
+def _calendar_failure_message(action: str = "schedule") -> str:
+    return _respond(
+        action,
+        "Tive uma instabilidade ao consultar a agenda agora. Se quiser, posso tentar novamente em instantes.",
+    )
+
+
+def _build_consultation_details_invite(triage_data: Optional[TriageOutput]) -> str:
+    if not triage_data:
+        return ""
+    if (triage_data.service_suggested or DEFAULT_SERVICE) != "Consulta":
+        return ""
+
+    missing_details = []
+    if not triage_data.pet_breed:
+        missing_details.append("raca")
+    if triage_data.pet_weight is None:
+        missing_details.append("peso")
+    if not triage_data.pet_age:
+        missing_details.append("idade")
+    if not triage_data.symptoms_summary:
+        missing_details.append("sintomas")
+
+    if not missing_details:
+        return ""
+
+    return (
+        " Se quiser agilizar a consulta, voce tambem pode me contar raca, peso, idade "
+        "e os sintomas que estiver percebendo."
+    )
+
+
+def _services_match(requested_service: Optional[str], current_service: Optional[str]) -> bool:
+    return (requested_service or DEFAULT_SERVICE).strip().lower() == (current_service or DEFAULT_SERVICE).strip().lower()
+
+
 def _carry_detected_date(pending_action: Optional[str]) -> bool:
     return pending_action in {
         "awaiting_time_preference",
@@ -183,20 +227,30 @@ def _carry_selected_appointment_id(intent: Optional[str], pending_action: Option
     }
 
 
-def _load_tutor_memory(phone: Optional[str]) -> tuple[Optional[dict], List[dict]]:
-    if not phone:
+def _load_tutor_memory(phone: Optional[str], tutor_cpf: Optional[str] = None) -> tuple[Optional[dict], List[dict]]:
+    if not phone and not tutor_cpf:
         return None, []
 
-    try:
-        lead = get_lead_by_phone(phone)
-    except Exception as exc:
-        logger.exception("Failed to load lead memory: %s", exc)
-        lead = None
+    lead = None
+    if phone:
+        try:
+            lead = get_lead_by_phone(phone)
+        except Exception as exc:
+            logger.warning("Failed to load lead memory: %s", exc)
+            lead = None
+
+    if lead is None and tutor_cpf:
+        try:
+            lead = get_lead_by_cpf(tutor_cpf)
+        except Exception as exc:
+            logger.warning("Failed to load lead memory by CPF: %s", exc)
+            lead = None
 
     try:
-        pets = get_pets_by_phone(phone)
+        pets_phone = phone or (lead.get("phone") if lead else None)
+        pets = get_pets_by_phone(pets_phone) if pets_phone else []
     except Exception as exc:
-        logger.exception("Failed to load pet memory: %s", exc)
+        logger.warning("Failed to load pet memory: %s", exc)
         pets = []
 
     return lead, pets
@@ -207,7 +261,7 @@ def _hydrate_triage_from_memory(
     *,
     phone: Optional[str],
 ) -> TriageOutput:
-    lead, pets = _load_tutor_memory(phone)
+    lead, pets = _load_tutor_memory(phone, triage_data.tutor_cpf)
     if not lead and not pets:
         return triage_data
 
@@ -320,9 +374,21 @@ def triage_node(state: ClinivetState):
     conversation_completed = bool(state.get("conversation_completed"))
     new_schedule_active = bool(state.get("new_schedule_active"))
     onboarding_started = bool(state.get("onboarding_started"))
+    onboarding_guidance_needed = bool(state.get("onboarding_guidance_needed"))
+    pending_pet_names = state.get("pending_pet_names") or []
     reset_for_new_schedule = False
     current_lead_id = None if new_schedule_active else state.get("lead_id")
     current_pet_id = None if new_schedule_active else state.get("pet_id")
+    phone_hint = extract_phone_candidate(state.get("thread_id"))
+    known_lead, known_pets = _load_tutor_memory(phone_hint)
+    require_guided_onboarding = (
+        not new_schedule_active
+        and (
+            known_lead is None
+            or not known_lead.get("tutor_name")
+            or not known_lead.get("tutor_cpf")
+        )
+    )
 
     if (
         not state.get("triage_data")
@@ -338,6 +404,22 @@ def triage_node(state: ClinivetState):
             "next_step": "end",
             "pending_action": "awaiting_initial_request",
             "onboarding_started": True,
+            "onboarding_guidance_needed": True,
+        }
+
+    if pending_action == "awaiting_initial_request" and is_non_progress_message(latest_message):
+        reminder_message = _respond(
+            "greeting",
+            "Posso te ajudar com agendamento, remarcacao, cancelamento ou informacoes sobre o atendimento. Para comecarmos, me diga objetivamente o que voce precisa.",
+        )
+        return {
+            "assistant_message": reminder_message,
+            "messages": [AIMessage(content=reminder_message)],
+            "intent": "greeting",
+            "next_step": "end",
+            "pending_action": "awaiting_initial_request",
+            "onboarding_started": True,
+            "onboarding_guidance_needed": True,
         }
 
     if is_user_frustrated(latest_message):
@@ -351,7 +433,28 @@ def triage_node(state: ClinivetState):
             "intent": "frustration",
             "next_step": "end",
             "pending_action": None,
+            "available_slots": [],
+            "appointment_date": None,
+            "selected_slot": None,
+            "detected_time": None,
+            "detected_date": None,
+            "selected_appointment_id": None,
+            "new_schedule_active": False,
         }
+
+    if pending_action in {"awaiting_reschedule_date", "reschedule_appointment"} and is_explicit_new_schedule_request(
+        latest_message
+    ):
+        intent = "schedule"
+        conversation_completed = False
+        new_schedule_active = True
+        reset_for_new_schedule = True
+        current_lead_id = None
+        current_pet_id = None
+        pending_action = None
+        selected_appointment_id = None
+        detected_date = parsed_date
+        selected_slot = None
 
     if conversation_completed and intent not in {
         "cancel",
@@ -381,6 +484,12 @@ def triage_node(state: ClinivetState):
                     "intent": "closing",
                     "next_step": "end",
                     "pending_action": None,
+                    "available_slots": [],
+                    "appointment_date": None,
+                    "selected_slot": None,
+                    "detected_time": None,
+                    "detected_date": None,
+                    "selected_appointment_id": None,
                     "conversation_completed": True,
                     "new_schedule_active": False,
                 }
@@ -395,6 +504,12 @@ def triage_node(state: ClinivetState):
                 "intent": "post_confirmation",
                 "next_step": "end",
                 "pending_action": None,
+                "available_slots": [],
+                "appointment_date": None,
+                "selected_slot": None,
+                "detected_time": None,
+                "detected_date": None,
+                "selected_appointment_id": None,
                 "conversation_completed": True,
                 "new_schedule_active": False,
             }
@@ -421,12 +536,30 @@ def triage_node(state: ClinivetState):
         }
 
     if pending_action == "confirm_slot" and selected_slot:
+        if is_clean_time_choice(latest_message):
+            return {
+                "intent": "schedule",
+                "next_step": "confirm_slot",
+                "selected_slot": selected_slot,
+                "detected_time": selected_slot,
+                "time_preference": time_preference,
+                "detected_date": detected_date,
+                "selected_appointment_id": selected_appointment_id,
+                "conversation_completed": conversation_completed,
+                "new_schedule_active": new_schedule_active,
+                "onboarding_started": onboarding_started,
+            }
+
+    if pending_action == "confirm_slot":
+        message = _respond("schedule", "Escolha apenas um dos horarios sugeridos para eu confirmar o agendamento.")
         return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
             "intent": "schedule",
-            "next_step": "confirm_slot",
-            "selected_slot": selected_slot,
-            "detected_time": selected_slot,
-            "time_preference": time_preference,
+            "next_step": "end",
+            "pending_action": "confirm_slot",
+            "available_slots": state.get("available_slots") or [],
+            "appointment_date": state.get("appointment_date"),
             "detected_date": detected_date,
             "selected_appointment_id": selected_appointment_id,
             "conversation_completed": conversation_completed,
@@ -476,6 +609,158 @@ def triage_node(state: ClinivetState):
             "onboarding_started": onboarding_started,
         }
 
+    if pending_action == "awaiting_reschedule_or_new_service":
+        normalized_message = latest_message.lower()
+        if "novo agendamento" in normalized_message or "novo servico" in normalized_message:
+            return {
+                "intent": "schedule",
+                "next_step": "ask_time_preference",
+                "conversation_completed": False,
+                "new_schedule_active": True,
+                "pending_action": None,
+                "lead_id": None,
+                "pet_id": None,
+                "selected_appointment_id": None,
+                "available_slots": [],
+                "appointment_date": None,
+                "selected_slot": None,
+                "detected_time": None,
+                "detected_date": detected_date,
+                "service_name": state.get("service_name"),
+                "triage_data": state.get("triage_data"),
+                "onboarding_started": onboarding_started,
+            }
+        if "remarcar" in normalized_message or "consulta atual" in normalized_message or "mesma consulta" in normalized_message:
+            return {
+                "intent": "reschedule",
+                "next_step": "reschedule_appointment",
+                "selected_appointment_id": selected_appointment_id,
+                "pending_action": "reschedule_appointment",
+                "detected_date": detected_date,
+                "conversation_completed": conversation_completed,
+                "new_schedule_active": False,
+                "onboarding_started": onboarding_started,
+            }
+        clarification = _respond(
+            "reschedule",
+            "Posso remarcar a consulta atual ou abrir um novo agendamento para o novo servico. O que voce prefere?",
+        )
+        return {
+            "assistant_message": clarification,
+            "messages": [AIMessage(content=clarification)],
+            "intent": "reschedule",
+            "next_step": "end",
+            "pending_action": "awaiting_reschedule_or_new_service",
+            "selected_appointment_id": selected_appointment_id,
+            "conversation_completed": conversation_completed,
+            "new_schedule_active": False,
+            "onboarding_started": onboarding_started,
+        }
+
+    if pending_action == "retry_schedule_slots":
+        return {
+            "intent": "schedule",
+            "next_step": "scheduling",
+            "detected_date": detected_date,
+            "conversation_completed": conversation_completed,
+            "new_schedule_active": new_schedule_active,
+            "onboarding_started": onboarding_started,
+            "pending_action": None,
+        }
+
+    if pending_action == "retry_suggest_slots":
+        return {
+            "intent": "schedule",
+            "next_step": "suggest_slots",
+            "detected_date": detected_date,
+            "time_preference": time_preference or state.get("time_preference"),
+            "conversation_completed": conversation_completed,
+            "new_schedule_active": new_schedule_active,
+            "onboarding_started": onboarding_started,
+            "pending_action": None,
+        }
+
+    if pending_action == "retry_reschedule_slots":
+        return {
+            "intent": "reschedule",
+            "next_step": "reschedule_appointment",
+            "detected_date": detected_date,
+            "time_preference": time_preference or state.get("time_preference"),
+            "selected_appointment_id": selected_appointment_id,
+            "conversation_completed": conversation_completed,
+            "new_schedule_active": False,
+            "onboarding_started": onboarding_started,
+            "pending_action": "reschedule_appointment",
+        }
+
+    if pending_action in {"awaiting_missing_data", "awaiting_initial_request"}:
+        current_missing_fields = state.get("missing_fields") or []
+        expected_field = current_missing_fields[0] if current_missing_fields else None
+        if expected_field and (
+            is_non_progress_message(latest_message)
+            or (
+                detect_intent(latest_message) != "triage"
+                and not has_plausible_field_answer(expected_field, latest_message)
+            )
+            or (
+                not has_plausible_field_answer(expected_field, latest_message)
+                and expected_field in {"tutor_cpf", "pet_species", "phone"}
+            )
+        ):
+            message = _respond(
+                "triage",
+                build_missing_data_message(
+                    [expected_field],
+                    guided_onboarding=bool(state.get("onboarding_guidance_needed") or onboarding_started),
+                ),
+            )
+            return {
+                "assistant_message": message,
+                "messages": [AIMessage(content=message)],
+                "intent": "triage",
+                "next_step": "end",
+                "pending_action": pending_action,
+                "missing_fields": current_missing_fields,
+                "triage_data": state.get("triage_data"),
+                "lead_id": current_lead_id,
+                "pet_id": current_pet_id,
+                "conversation_completed": conversation_completed,
+                "new_schedule_active": new_schedule_active,
+                "available_slots": state.get("available_slots") or [],
+                "appointment_date": state.get("appointment_date"),
+                "detected_date": detected_date,
+                "selected_appointment_id": selected_appointment_id,
+                "onboarding_started": onboarding_started,
+                "onboarding_guidance_needed": bool(state.get("onboarding_guidance_needed")),
+                "pending_pet_names": pending_pet_names,
+            }
+
+    chosen_pet_name = None
+    if pending_action == "awaiting_single_pet_choice":
+        chosen_pet_name = extract_single_pet_choice(latest_message, pending_pet_names)
+        if not chosen_pet_name:
+            listed_pet_names = ", ".join(pending_pet_names)
+            message = _respond(
+                "multi_pet",
+                f"Para evitar erro, vamos seguir com um pet por vez. Escolha um destes pets: {listed_pet_names}.",
+                pet_names=pending_pet_names,
+            )
+            return {
+                "assistant_message": message,
+                "messages": [AIMessage(content=message)],
+                "intent": "schedule",
+                "next_step": "end",
+                "pending_action": "awaiting_single_pet_choice",
+                "pending_pet_names": pending_pet_names,
+                "conversation_completed": False,
+                "new_schedule_active": True,
+                "available_slots": [],
+                "appointment_date": None,
+                "selected_slot": None,
+                "detected_time": None,
+                "selected_appointment_id": None,
+            }
+
     if structured_llm is None:
         raise RuntimeError(
             "langchain_openai is required at runtime. Install dependencies with: pip install -r requirements.txt"
@@ -499,6 +784,9 @@ def triage_node(state: ClinivetState):
         triage_result,
         phone=triage_result.phone or extract_phone_candidate(state.get("thread_id")),
     )
+    if chosen_pet_name:
+        triage_result.pet_name = chosen_pet_name
+        triage_result = normalize_triage_result(triage_result)
 
     explicit_pet_mentions = extract_multiple_pet_mentions(latest_message)
     if len(explicit_pet_mentions) > 1:
@@ -516,6 +804,7 @@ def triage_node(state: ClinivetState):
             "intent": intent,
             "next_step": "end",
             "pending_action": "awaiting_single_pet_choice",
+            "pending_pet_names": explicit_pet_mentions,
             "conversation_completed": False,
             "new_schedule_active": True,
             "available_slots": [],
@@ -538,18 +827,29 @@ def triage_node(state: ClinivetState):
             "messages": [AIMessage(content=multi_pet_message)],
             "intent": intent,
             "next_step": "end",
-            "pending_action": None,
+            "pending_action": "awaiting_single_pet_choice",
+            "pending_pet_names": pet_names,
             "conversation_completed": False,
+            "new_schedule_active": True,
+            "available_slots": [],
+            "appointment_date": None,
+            "selected_slot": None,
+            "detected_time": None,
+            "selected_appointment_id": None,
         }
 
     logger.info("TRIAGE RESULT: %s", triage_result.model_dump())
 
-    known_lead = get_lead_by_phone(triage_result.phone) if triage_result.phone else None
+    if not (known_lead and triage_result.phone == phone_hint):
+        known_lead, loaded_pets = _load_tutor_memory(triage_result.phone, triage_result.tutor_cpf)
+        if loaded_pets:
+            known_pets = loaded_pets
     missing_fields = get_missing_required_fields(
         triage_result,
         state.get("thread_id"),
         require_onboarding_fields=(
             onboarding_started
+            or require_guided_onboarding
             or bool(known_lead and known_lead.get("tutor_name") and not known_lead.get("tutor_cpf"))
         ),
     )
@@ -565,7 +865,10 @@ def triage_node(state: ClinivetState):
             "time_preference": time_preference,
             "detected_date": detected_date,
             "assistant_message": None,
-            "onboarding_started": onboarding_started,
+            "onboarding_started": onboarding_started or require_guided_onboarding,
+            "onboarding_guidance_needed": onboarding_guidance_needed or (
+                require_guided_onboarding and not onboarding_started
+            ),
             "conversation_completed": conversation_completed,
             "new_schedule_active": new_schedule_active,
             "available_slots": [] if reset_for_new_schedule else state.get("available_slots"),
@@ -573,7 +876,8 @@ def triage_node(state: ClinivetState):
             "selected_slot": None,
             "detected_time": None,
             "selected_appointment_id": None,
-            "pending_action": "awaiting_missing_data" if reset_for_new_schedule else pending_action,
+            "pending_action": "awaiting_missing_data",
+            "pending_pet_names": pending_pet_names if pending_action == "awaiting_single_pet_choice" else [],
         }
 
     lead_id = current_lead_id
@@ -650,6 +954,8 @@ def triage_node(state: ClinivetState):
         "conversation_completed": conversation_completed,
         "new_schedule_active": False,
         "onboarding_started": False,
+        "onboarding_guidance_needed": False,
+        "pending_pet_names": [],
         "available_slots": [] if reset_for_new_schedule else state.get("available_slots"),
         "appointment_date": None if reset_for_new_schedule else state.get("appointment_date"),
         "next_step": next_step,
@@ -661,19 +967,26 @@ def triage_node(state: ClinivetState):
 
 def ask_missing_data_node(state: ClinivetState):
     missing_fields = state.get("missing_fields") or []
-    message = _respond("triage", build_missing_data_message(missing_fields))
+    guided_onboarding = bool(state.get("onboarding_guidance_needed"))
+    message = _respond(
+        "triage",
+        build_missing_data_message(missing_fields, guided_onboarding=guided_onboarding),
+    )
     return {
         "assistant_message": message,
         "messages": [AIMessage(content=message)],
+        "onboarding_guidance_needed": False,
         "next_step": "end",
     }
 
 
 def ask_time_preference_node(state: ClinivetState):
+    triage_data = state.get("triage_data")
     base_message = (
         "Claro! Vamos encontrar um bom horario para o seu pet. "
         "Voce prefere atendimento pela manha, a tarde, ou qualquer horario disponivel?"
     )
+    base_message += _build_consultation_details_invite(triage_data)
     message = _respond("schedule", base_message, detected_date=state.get("detected_date"))
     return {
         "assistant_message": message,
@@ -704,11 +1017,25 @@ def suggest_slots_node(state: ClinivetState):
             "pending_action": None,
         }
 
-    slots = find_available_slots(
-        date=appointment_date,
-        period=time_preference,
-        service_name=service_name,
-    )
+    try:
+        slots = find_available_slots(
+            date=appointment_date,
+            period=time_preference,
+            service_name=service_name,
+        )
+    except RuntimeError as exc:
+        logger.warning("Failed to load suggested slots: %s", exc)
+        message = _calendar_failure_message("schedule")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "next_step": "end",
+            "pending_action": "retry_suggest_slots",
+            "appointment_date": appointment_date,
+            "detected_date": appointment_date,
+            "time_preference": time_preference,
+            "service_name": service_name,
+        }
 
     if not slots:
         message = _respond("schedule", "Nao encontrei horarios disponiveis para essa preferencia agora.")
@@ -836,9 +1163,26 @@ def scheduling_node(state: ClinivetState):
             "messages": [AIMessage(content=rendered_message)],
             "next_step": "end",
         }
+    except RuntimeError as exc:
+        logger.warning("Failed to load slots: %s", exc)
+        message = _calendar_failure_message("schedule")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "next_step": "end",
+            "pending_action": "retry_schedule_slots",
+            "detected_date": state.get("detected_date"),
+        }
     except Exception as exc:
-        logger.exception("Failed to load slots: %s", exc)
-        raise
+        logger.warning("Unexpected scheduling error while loading slots: %s", exc)
+        message = _calendar_failure_message("schedule")
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "next_step": "end",
+            "pending_action": "retry_schedule_slots",
+            "detected_date": state.get("detected_date"),
+        }
 
     logger.info("AVAILABLE SLOTS: %s", available_slots)
 
@@ -979,6 +1323,11 @@ def check_appointment_node(state: ClinivetState):
         "messages": [AIMessage(content=message)],
         "user_appointments": appointments,
         "pending_action": None,
+        "available_slots": [],
+        "appointment_date": None,
+        "selected_slot": None,
+        "detected_time": None,
+        "detected_date": None,
         "next_step": "end",
     }
 
@@ -1086,6 +1435,27 @@ def reschedule_appointment_node(state: ClinivetState):
     appointment_date = detected_date or state.get("appointment_date") or build_next_business_day()
     service_name = appointment.get("service_name") or DEFAULT_SERVICE
     available_slots = state.get("available_slots") or []
+    latest_message = get_latest_human_message(state.get("messages") or [])
+    requested_service = detect_requested_service(latest_message)
+
+    if requested_service and not _services_match(requested_service, service_name):
+        triage_data = state.get("triage_data")
+        if triage_data:
+            triage_data = triage_data.model_copy(update={"service_suggested": requested_service})
+        message = _respond(
+            "reschedule",
+            f"Posso remarcar a {service_name.lower()} atual ou abrir um novo agendamento para {requested_service}. O que voce prefere?",
+        )
+        return {
+            "assistant_message": message,
+            "messages": [AIMessage(content=message)],
+            "pending_action": "awaiting_reschedule_or_new_service",
+            "selected_appointment_id": appointment_id,
+            "detected_date": detected_date,
+            "service_name": requested_service,
+            "triage_data": triage_data,
+            "next_step": "end",
+        }
 
     if not selected_slot:
         if not state.get("detected_date") and not time_preference:
@@ -1131,11 +1501,24 @@ def reschedule_appointment_node(state: ClinivetState):
                 "next_step": "end",
             }
 
-        available_slots = find_available_slots(
-            date=appointment_date,
-            period=time_preference,
-            service_name=service_name,
-        )
+        try:
+            available_slots = find_available_slots(
+                date=appointment_date,
+                period=time_preference,
+                service_name=service_name,
+            )
+        except RuntimeError as exc:
+            logger.warning("Failed to load reschedule slots: %s", exc)
+            message = _calendar_failure_message("reschedule")
+            return {
+                "assistant_message": message,
+                "messages": [AIMessage(content=message)],
+                "pending_action": "retry_reschedule_slots",
+                "selected_appointment_id": appointment_id,
+                "detected_date": appointment_date,
+                "time_preference": time_preference,
+                "next_step": "end",
+            }
         if not available_slots:
             message = _respond("reschedule", "Nao encontrei horarios disponiveis para essa preferencia.")
             return {

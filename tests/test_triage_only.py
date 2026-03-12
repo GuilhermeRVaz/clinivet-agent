@@ -23,6 +23,7 @@ def test_normal_triage(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Joao",
+                tutor_cpf="11122233344",
                 pet_name="Rex",
                 pet_species="Cao",
                 urgency_level="routine",
@@ -66,6 +67,7 @@ def test_emergency_case(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Maria",
+                tutor_cpf="11122233344",
                 pet_name="Simba",
                 pet_species="Gato",
                 urgency_level="emergency",
@@ -88,6 +90,7 @@ def test_banho_e_tosa_detection(monkeypatch):
         DummyStructuredLLM(
             TriageOutput(
                 tutor_name="Ana",
+                tutor_cpf="11122233344",
                 pet_name="Luna",
                 pet_species="Cao",
                 urgency_level="routine",

@@ -108,6 +108,24 @@ def get_lead_by_phone(phone: str) -> Optional[dict]:
     return response.data[0]
 
 
+def get_lead_by_cpf(tutor_cpf: str) -> Optional[dict]:
+    if not tutor_cpf:
+        return None
+
+    response = (
+        get_supabase_client()
+        .table("leads")
+        .select("*")
+        .eq("tutor_cpf", tutor_cpf)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not response.data:
+        return None
+    return response.data[0]
+
+
 def get_pets_by_phone(phone: str) -> List[dict]:
     response = (
         get_supabase_client()
